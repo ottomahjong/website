@@ -1231,7 +1231,7 @@ const MATERIALS = {
   },
   'acrylic-clear': {
     label: 'Acrylic (clear)',
-    params: { roughness: 0.0, metalness: 0.0, transmission: 0.95, thickness: 2, ior: 1.49, transparent: true },
+    params: { roughness: 0.0, metalness: 0.0, transmission: 0.88, thickness: 3, ior: 1.5, transparent: true, opacity: 0.92 },
     grain: null
   },
   'acrylic-frosted': {
@@ -1419,90 +1419,33 @@ const EXPLODE_GAP = 8; // mm gap between layers in exploded view
 const UNIT = 1;        // 1 unit = 1 mm in scene space
 
 // ─────────────────────────────────────────────────────────────
-// TILE LAYER GEOMETRY BUILDER
-// Creates a box with straight vertical sides (no XZ rounding),
-// with optional 45° chamfer on top and/or bottom face only.
-//
+// ROUNDED RECT SHAPE
+// Creates a THREE.Shape for use with ExtrudeGeometry.
+// W, H, R are in scene units (mm × UNIT).
+// ─────────────────────────────────────────────────────────────
+function makeRoundedRectShape(W, H, R) {
+  const r = Math.min(R, W / 2 - 0.1, H / 2 - 0.1);
+  const s = new THREE.Shape();
+  s.moveTo(-W / 2 + r, -H / 2);
+  s.lineTo( W / 2 - r, -H / 2);
+  s.quadraticCurveTo( W / 2, -H / 2,  W / 2, -H / 2 + r);
+  s.lineTo( W / 2,  H / 2 - r);
+  s.quadraticCurveTo( W / 2,  H / 2,  W / 2 - r,  H / 2);
+  s.lineTo(-W / 2 + r,  H / 2);
+  s.quadraticCurveTo(-W / 2,  H / 2, -W / 2,  H / 2 - r);
+  s.lineTo(-W / 2, -H / 2 + r);
+  s.quadraticCurveTo(-W / 2, -H / 2, -W / 2 + r, -H / 2);
+  return s;
+}
+
+// (old makeTileLayerGeometry replaced by makeRoundedRectShape + ExtrudeGeometry in buildTile)
 // All four layers share the same W×H XZ footprint so sides
 // are perfectly flush — the result looks like one solid tile.
 //
 // bevelSize: chamfer size in mm (affects how large the bevel is)
 // bevelTop/bevelBottom: which face(s) get the chamfer
 //
-// To change chamfer style (e.g. curved instead of 45°): add
-// intermediate rings at sin/cos offsets around the edge loop.
-// To add a new layer type with different bevel: pass booleans.
-// ─────────────────────────────────────────────────────────────
-function makeTileLayerGeometry(W, H, t, bevelSize, bevelTop, bevelBottom) {
-  const hw = W/2, hh = H/2;
-  const yT = t/2, yB = -t/2;
-  // Clamp bevel so it never exceeds half the face
-  const cT = bevelTop    ? Math.min(bevelSize, Math.min(hw, hh) * 0.45) : 0;
-  const cB = bevelBottom ? Math.min(bevelSize, Math.min(hw, hh) * 0.45) : 0;
-
-  // Shoulder Y: where straight sides end and chamfer begins
-  const ytSh = yT - cT;
-  const ybSh = yB + cB;
-
-  // Inset face half-extents (top cap / bottom cap)
-  const hwT = hw - cT, hhT = hh - cT;
-  const hwB = hw - cB, hhB = hh - cB;
-
-  const pos = [], nrm = [], uvA = [];
-
-  // Emit a quad as two triangles (a-b-c, a-c-d)
-  // n = normal array [nx,ny,nz]
-  // u0–u3 = optional per-vertex UV [u,v] (if omitted, uses default tiling)
-  function quad(a, b, c, d, n, u0, u1, u2, u3) {
-    pos.push(...a,...b,...c, ...a,...c,...d);
-    nrm.push(...n,...n,...n, ...n,...n,...n);
-    if (u0) {
-      uvA.push(...u0,...u1,...u2, ...u0,...u2,...u3);
-    } else {
-      uvA.push(0,0,1,0,1,1, 0,0,1,1,0,1);
-    }
-  }
-
-  const D = 1/Math.SQRT2; // diagonal normal component
-
-  // ── TOP FACE ── UV maps X→U (0-1 across W), Z→V (0-1 across H)
-  quad([-hwT,yT,-hhT],[hwT,yT,-hhT],[hwT,yT,hhT],[-hwT,yT,hhT],
-    [0,1,0], [0,0],[1,0],[1,1],[0,1]);
-
-  // ── BOTTOM FACE ── UV mirrored in U so design reads correctly from below
-  quad([-hwB,yB,hhB],[hwB,yB,hhB],[hwB,yB,-hhB],[-hwB,yB,-hhB],
-    [0,-1,0], [1,1],[0,1],[0,0],[1,0]);
-
-  // ── STRAIGHT VERTICAL SIDES ── (ybSh to ytSh, full XZ extent)
-  quad([-hw,ytSh, hh],[hw,ytSh, hh],[hw,ybSh, hh],[-hw,ybSh, hh], [0,0, 1]);
-  quad([ hw,ytSh,-hh],[-hw,ytSh,-hh],[-hw,ybSh,-hh],[hw,ybSh,-hh], [0,0,-1]);
-  quad([ hw,ytSh, hh],[ hw,ytSh,-hh],[ hw,ybSh,-hh],[ hw,ybSh, hh], [1,0,0]);
-  quad([-hw,ytSh,-hh],[-hw,ytSh, hh],[-hw,ybSh, hh],[-hw,ybSh,-hh], [-1,0,0]);
-
-  // ── TOP CHAMFER (45° bevel on top face perimeter) ──
-  // Each chamfer quad shares its diagonal corner edge with its neighbor — no gaps.
-  if (cT > 0) {
-    quad([-hwT,yT, hhT],[hwT,yT, hhT],[ hw,ytSh, hh],[-hw,ytSh, hh], [0,D,D]);
-    quad([ hwT,yT,-hhT],[-hwT,yT,-hhT],[-hw,ytSh,-hh],[ hw,ytSh,-hh], [0,D,-D]);
-    quad([ hwT,yT, hhT],[hwT,yT,-hhT],[ hw,ytSh,-hh],[ hw,ytSh, hh], [D,D,0]);
-    quad([-hwT,yT,-hhT],[-hwT,yT, hhT],[-hw,ytSh, hh],[-hw,ytSh,-hh], [-D,D,0]);
-  }
-
-  // ── BOTTOM CHAMFER (45° bevel on bottom face perimeter) ──
-  if (cB > 0) {
-    quad([-hw,ybSh, hh],[ hw,ybSh, hh],[ hwB,yB, hhB],[-hwB,yB, hhB], [0,-D, D]);
-    quad([ hw,ybSh,-hh],[-hw,ybSh,-hh],[-hwB,yB,-hhB],[ hwB,yB,-hhB], [0,-D,-D]);
-    quad([ hw,ybSh, hh],[ hw,ybSh,-hh],[ hwB,yB,-hhB],[ hwB,yB, hhB], [D,-D,0]);
-    quad([-hw,ybSh,-hh],[-hw,ybSh, hh],[-hwB,yB, hhB],[-hwB,yB,-hhB], [-D,-D,0]);
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setAttribute('normal',   new THREE.Float32BufferAttribute(nrm, 3));
-  geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvA, 2));
-  geo.computeBoundingSphere();
-  return geo;
-}
+// (old makeTileLayerGeometry removed — see makeRoundedRectShape above)
 
 let tileMeshes = [];   // current layer meshes
 let tileIsExploded = false;
@@ -1518,41 +1461,53 @@ function buildTile(exploded = false) {
   tileMeshes = [];
 
   const { width: W, height: H, depth: D, cornerRadius: R } = state.tile;
-  // Chamfer size: 40% of corner radius, max 2mm — kept subtle.
-  // To change bevel size: adjust this expression.
+  // Bevel size: 40% of corner radius, max 2mm — kept subtle.
   const BEVEL = Math.min(R * 0.4, 2.0);
-  const layerCount = state.layers.filter((l, i) => l.visible || i !== 2).length;
 
   // Validate and auto-adjust layer thicknesses
   validateThicknesses();
 
+  // Determine which layers are visible
+  const visibleLayers = state.layers
+    .map((layer, i) => ({ layer, i }))
+    .filter(({ layer, i }) => !(i === 2 && !layer.visible));
+  const totalVisible = visibleLayers.length;
+
   // Build cumulative Y positions (bottom-up)
   let yOffset = -D / 2; // start at bottom of tile
-  let visibleIdx = 0;   // track which visible layers we've built
 
-  state.layers.forEach((layer, i) => {
-    if (!layer.visible && i === 2) return; // Inlay optional
-
+  visibleLayers.forEach(({ layer, i }, visibleIdx) => {
     const t = layer.thickness;
     const isFirst = (visibleIdx === 0);
-    const isLast  = (i === state.layers.length - 1) || (i === 2 && !state.layers[3].visible);
-    // Base (first visible) gets bevel on bottom; Cap (last) gets bevel on top.
-    // All middle layers: plain box with flush straight sides.
-    const geo = makeTileLayerGeometry(W * UNIT, H * UNIT, t * UNIT,
-      BEVEL, /*bevelTop=*/ isLast, /*bevelBottom=*/ isFirst);
-    visibleIdx++;
+    const isLast  = (visibleIdx === totalVisible - 1);
 
-    const mat = makeMaterial(layer.material, layer.color,
-      i === 3 ? (layer.opacity ?? 100) : 100, W, H);
+    // ExtrudeGeometry along Z, then rotate -90° X so it lies flat (Z→Y).
+    // Bevel only on the externally-visible cap face of first/last layers.
+    const shape = makeRoundedRectShape(W * UNIT, H * UNIT, R * UNIT);
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth:          t * UNIT,
+      bevelEnabled:   isFirst || isLast,
+      bevelThickness: (isFirst || isLast) ? BEVEL * UNIT : 0,
+      bevelSize:      (isFirst || isLast) ? BEVEL * UNIT : 0,
+      bevelOffset:    0,
+      bevelSegments:  2,
+    });
+    // Rotate so extrusion axis (Z) aligns with scene Y (vertical).
+    geo.rotateX(-Math.PI / 2);
+    // Center geometry vertically around y=0 so mesh.position.y = layer center.
+    geo.translate(0, -t * UNIT / 2, 0);
+
+    // Cap (topmost visible) gets its opacity applied; all others are fully opaque.
+    const opacity = isLast ? (layer.opacity ?? 100) : 100;
+    const mat = makeMaterial(layer.material, layer.color, opacity, W, H);
 
     const mesh = new THREE.Mesh(geo, mat);
 
-    // Position: center of this layer
+    // Position: center of this layer in scene Y
     const layerCenterY = yOffset + t / 2;
     mesh.position.y = layerCenterY * UNIT;
 
     if (exploded) {
-      // Spread layers apart
       mesh.position.y += i * EXPLODE_GAP * UNIT;
     }
 
@@ -1664,15 +1619,15 @@ const LIGHT_PRESETS = {
     // High-contrast void: key upper-left, fill lower-right
     keyPos:     [40, 80, 30],
     keyColor:   0xfff8f0,
-    keyInt:     2.5,
+    keyInt:     3.5,
     fillPos:    [-30, -20, -40],
     fillColor:  0x8090ff,
-    fillInt:    0.4,
+    fillInt:    0.6,
     ambColor:   0x111111,
-    ambInt:     0.05,
-    rimPos:     [0, -30, -60],
+    ambInt:     0.15,
+    rimPos:     [0, -20, -80],
     rimColor:   0xffffff,
-    rimInt:     0.3,
+    rimInt:     0.8,
     bgColor:    0x000000,
     fog:        false,
   },
@@ -1941,7 +1896,7 @@ const designSys = {
 
     // Background color: cap color for face A, base color for face B
     const faceColor = state.design.activeFace === 'A'
-      ? state.layers[3].color
+      ? state.layers[state.layers.length - 1].color
       : state.layers[0].color;
     ctx.fillStyle = faceColor;
     ctx.fillRect(0, 0, W * S, H * S);
@@ -2391,15 +2346,37 @@ const flatLaySys = {
     const cols = Math.ceil(Math.sqrt(count * W / H));
     const rows = Math.ceil(count / cols);
 
-    // Build geometry + InstancedMesh per layer
-    let yOffset = -D / 2;
-    state.layers.forEach((layer, li) => {
-      if (!layer.visible && li === 2) { yOffset += layer.thickness; return; }
+    // Build geometry + InstancedMesh per layer using rounded shape (matches single-tile view)
+    const { cornerRadius: R } = state.tile;
+    const BEVEL = Math.min(R * 0.4, 2.0);
+    const visLayersFL = state.layers
+      .map((layer, i) => ({ layer, i }))
+      .filter(({ layer, i }) => !(i === 2 && !layer.visible));
+    const totalVisFL = visLayersFL.length;
 
+    let yOffset = -D / 2;
+    let flVisIdx = 0;
+    state.layers.forEach((layer, li) => {
       const t = layer.thickness;
-      const geo = new THREE.BoxGeometry(W, t, H);
-      const mat = makeMaterial(layer.material, layer.color,
-        li === 3 ? (layer.opacity ?? 100) : 100, W, H);
+      if (li === 2 && !layer.visible) { yOffset += t; return; }
+
+      const isFirstFL = (flVisIdx === 0);
+      const isLastFL  = (flVisIdx === totalVisFL - 1);
+      flVisIdx++;
+
+      const tileShape = makeRoundedRectShape(W, H, R);
+      const geo = new THREE.ExtrudeGeometry(tileShape, {
+        depth:          t,
+        bevelEnabled:   isFirstFL || isLastFL,
+        bevelThickness: (isFirstFL || isLastFL) ? BEVEL : 0,
+        bevelSize:      (isFirstFL || isLastFL) ? BEVEL : 0,
+        bevelOffset:    0,
+        bevelSegments:  2,
+      });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, -t / 2, 0);
+      const opacity = isLastFL ? (layer.opacity ?? 100) : 100;
+      const mat = makeMaterial(layer.material, layer.color, opacity, W, H);
 
       const iMesh = new THREE.InstancedMesh(geo, mat, count);
       iMesh.castShadow = false;
@@ -2639,7 +2616,7 @@ const exportSys = {
       link.click();
     };
 
-    dlSVG(faceToSVG(state.design.faceA.elements, state.layers[3].color, 'Face A — Cap / Front'),
+    dlSVG(faceToSVG(state.design.faceA.elements, state.layers[state.layers.length - 1].color, 'Face A — Cap / Front'),
           'otto-tile-face-A.svg');
     setTimeout(() =>
       dlSVG(faceToSVG(state.design.faceB.elements, state.layers[0].color, 'Face B — Base / Back'),
@@ -2859,7 +2836,20 @@ function buildLayerUI() {
     .map(([k, v]) => `<option value="${k}">${v.label}</option>`)
     .join('');
 
+  const lastIdx = state.layers.length - 1;
+  const canAdd = state.layers.length < 4;
+  const canRemove = state.layers.length > 2;
+
   state.layers.forEach((layer, i) => {
+    const isBase = (i === 0);
+    const isCap  = (i === lastIdx);
+    // Locked: Base (always index 0) and topmost Cap (always lastIdx)
+    const isLocked = isBase || isCap;
+    // Inlay visibility toggle: layers that are neither base nor cap (middle layers)
+    const showVisToggle = !isBase && !isCap;
+    // Opacity control: cap (last visible layer) only
+    const showOpacity = isCap;
+
     const card = document.createElement('div');
     card.className = 'layer-card';
     card.id = `layer-card-${i}`;
@@ -2870,7 +2860,8 @@ function buildLayerUI() {
         <div class="layer-color-swatch" id="swatch-${i}" style="background:${layer.color}"></div>
         <span class="layer-name">${layer.name}</span>
         <span class="layer-thickness-badge" id="badge-${i}">${layer.thickness}mm</span>
-        ${i === 2 ? `<button class="layer-visible-toggle" data-layer-vis="${i}" aria-label="Toggle ${layer.name} visibility" title="Toggle visibility">${layer.visible ? '◉' : '○'}</button>` : ''}
+        ${showVisToggle ? `<button class="layer-visible-toggle" data-layer-vis="${i}" aria-label="Toggle ${layer.name} visibility" title="Toggle visibility">${layer.visible ? '◉' : '○'}</button>` : ''}
+        ${(!isLocked && canRemove) ? `<button class="layer-remove-btn" data-layer-remove="${i}" aria-label="Remove ${layer.name}" title="Remove layer" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:0.9rem;padding:0 2px;line-height:1;">✕</button>` : ''}
         <span style="font-size:0.7rem;color:var(--text-secondary);margin-left:2px;">${layer.expanded ? '▾' : '▸'}</span>
       </div>
       <div class="layer-body ${layer.expanded ? '' : 'hidden'}" id="layer-body-${i}">
@@ -2892,7 +2883,7 @@ function buildLayerUI() {
           <input type="color" id="layer-color-${i}" data-layer-color="${i}"
                  value="${layer.color}" aria-label="${layer.name} color">
         </div>
-        ${i === 3 ? `
+        ${showOpacity ? `
         <div class="layer-row">
           <label for="layer-opacity-${i}">Opacity</label>
           <input type="range" id="layer-opacity-${i}" data-layer-opacity="${i}"
@@ -2905,6 +2896,27 @@ function buildLayerUI() {
 
     stack.appendChild(card);
   });
+
+  // "+ Add Layer" button (only shown when < 4 layers)
+  if (canAdd) {
+    const addBtn = document.createElement('button');
+    addBtn.id = 'layer-add-btn';
+    addBtn.textContent = '+ Add Layer';
+    addBtn.style.cssText = 'width:100%;margin-top:6px;padding:6px 0;background:var(--surface2,#2a2a3a);border:1px dashed var(--border,#444);border-radius:6px;color:var(--text-secondary,#aaa);cursor:pointer;font-size:0.8rem;';
+    addBtn.addEventListener('click', () => {
+      if (state.layers.length >= 4) return;
+      // Insert above Base (at index 1)
+      state.layers.splice(1, 0, {
+        name: 'Layer', thickness: 2, material: 'resin-matte',
+        color: '#888888', visible: true, expanded: false
+      });
+      validateThicknesses();
+      buildTile(tileIsExploded);
+      updateFlatLay();
+      buildLayerUI();
+    });
+    stack.appendChild(addBtn);
+  }
 
   // Event delegation for layer controls
   stack.addEventListener('input', e => {
@@ -2933,7 +2945,8 @@ function buildLayerUI() {
       buildTile(tileIsExploded);
       updateStackDiagram();
       updateFlatLay();
-      if (i === 3 || i === 0) designSys.draw(); // update design bg (face A uses layer 3, face B uses layer 0)
+      // Update design bg when cap or base color changes
+      if (i === state.layers.length - 1 || i === 0) designSys.draw();
     }
 
     if (el.dataset.layerOpacity !== undefined) {
@@ -2946,8 +2959,23 @@ function buildLayerUI() {
     }
   });
 
-  // Toggle expand
+  // Toggle expand + remove
   stack.addEventListener('click', e => {
+    // Remove button
+    const removeBtn = e.target.closest('[data-layer-remove]');
+    if (removeBtn) {
+      e.stopPropagation();
+      const i = parseInt(removeBtn.dataset.layerRemove);
+      if (state.layers.length <= 2) return;
+      if (i === 0 || i === state.layers.length - 1) return; // locked
+      state.layers.splice(i, 1);
+      validateThicknesses();
+      buildTile(tileIsExploded);
+      updateFlatLay();
+      buildLayerUI();
+      return;
+    }
+
     const toggle = e.target.closest('[data-layer-toggle]');
     if (toggle) {
       const i = parseInt(toggle.dataset.layerToggle);
@@ -2959,7 +2987,7 @@ function buildLayerUI() {
       toggle.setAttribute('aria-expanded', state.layers[i].expanded);
     }
 
-    // Visibility toggle (Inlay only)
+    // Visibility toggle (middle layers only)
     const visBtn = e.target.closest('[data-layer-vis]');
     if (visBtn) {
       e.stopPropagation();
@@ -3328,40 +3356,27 @@ function animate() {
 // For production, replace with a real HDRI using EXRLoader.
 // ─────────────────────────────────────────────────────────────
 function setupEnvironment() {
-  // Procedural gradient environment using a small canvas cube map
-  const envCanvas = document.createElement('canvas');
-  envCanvas.width = envCanvas.height = 64;
-  const ec = envCanvas.getContext('2d');
-  const grad = ec.createLinearGradient(0, 0, 0, 64);
-  grad.addColorStop(0, '#2a3050');
-  grad.addColorStop(0.5, '#0a0a12');
-  grad.addColorStop(1, '#050508');
-  ec.fillStyle = grad;
-  ec.fillRect(0, 0, 64, 64);
-
-  // Fake studio env using DataTexture
-  const pmremGen = new THREE.PMREMGenerator(renderer);
-  pmremGen.compileEquirectangularShader();
-
-  // Equirectangular gradient texture
-  const size = 256;
-  const data = new Uint8Array(size * size * 4 * 6);
-  // Fill with gradient approximation
-  for (let i = 0; i < size * size; i++) {
-    const y = Math.floor(i / size) / size;
-    const light = Math.floor((1 - y) * 60 + 10);
-    const base = i * 4;
-    data[base] = light; data[base+1] = light; data[base+2] = light;
-    data[base+3] = 255;
-  }
-  const envTex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  envTex.mapping = THREE.EquirectangularReflectionMapping;
-  envTex.needsUpdate = true;
-
-  const envMap = pmremGen.fromEquirectangular(envTex).texture;
-  scene.environment = envMap;
-  pmremGen.dispose();
-  envTex.dispose();
+  // Neutral warm-white gradient environment map (top bright, bottom dark).
+  // Avoids any colour bias so material colours render true.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const neutral = new THREE.DataTexture(
+    (() => {
+      const d = new Uint8Array(4 * 64 * 64);
+      for (let i = 0; i < 64 * 64; i++) {
+        const y = Math.floor(i / 64) / 64;
+        const v = Math.floor(220 - y * 160);
+        d[i*4] = v; d[i*4+1] = v; d[i*4+2] = v; d[i*4+3] = 255;
+      }
+      return d;
+    })(),
+    64, 64, THREE.RGBAFormat
+  );
+  neutral.mapping = THREE.EquirectangularReflectionMapping;
+  neutral.needsUpdate = true;
+  scene.environment = pmrem.fromEquirectangular(neutral).texture;
+  scene.environment.needsUpdate = true;
+  pmrem.dispose();
+  neutral.dispose();
 }
 
 // ─────────────────────────────────────────────────────────────
