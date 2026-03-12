@@ -1165,7 +1165,7 @@ const state = {
   // { id, type, x, y, w, h, text, fontSize, fontFamily,
   //   mode: 'blind'|'painted'|'raised', depth, fillColor,
   //   fillMaterial: 'matte'|'gloss'|'metallic' }
-  design: { elements: [], selectedId: null, tool: 'select' },
+  design: { faceA: { elements: [], selectedId: null }, faceB: { elements: [], selectedId: null }, activeFace: 'A', tool: 'select' },
   designCanvas: null,  // reference to offscreen design canvas
 
   // Lighting state
