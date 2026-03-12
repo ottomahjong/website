@@ -1111,13 +1111,18 @@ input[type="checkbox"] {
   </aside>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/exporters/GLTFExporter.js"></script>
-<script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
 // ═══════════════════════════════════════════════════════════════
-// OTTO TILE STUDIO — Main Application
-// Three.js r158 UMD build via CDN (broad mobile/browser support)
+// OTTO TILE STUDIO — Main Application Module
+// Three.js r158 ESM build via importmap
 //
 // Architecture:
 //   state         — single source of truth for all tile config
@@ -1130,9 +1135,10 @@ input[type="checkbox"] {
 //   presetSys     — localStorage preset management
 // ═══════════════════════════════════════════════════════════════
 
-// THREE is a global from three.min.js
-// THREE.OrbitControls is loaded from OrbitControls.js
-// THREE.GLTFExporter is loaded from GLTFExporter.js
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 
 // ─────────────────────────────────────────────────────────────
 // APPLICATION STATE
@@ -1269,7 +1275,7 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
 camera.position.set(0, 40, 120);
 
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 20;
@@ -2563,7 +2569,7 @@ const exportSys = {
   // Exports the tile group with all four layer meshes
   exportGLB() {
     showToast('Exporting GLB...');
-    const exporter = new THREE.GLTFExporter();
+    const exporter = new GLTFExporter();
     const exportTarget = state.view.mode === 'single' ? tileGroup : flatLayGroup;
 
     exporter.parse(
