@@ -1385,13 +1385,14 @@ function makeMaterial(materialKey, layerColor, opacity = 100, tileW = 36, tileH 
     params.opacity = opacity / 100;
   }
 
-  // Apply grain texture as roughness map + map (tinted)
+  // Apply grain texture as roughness map + diffuse map (tinted)
   if (def.grain) {
     const tex = makeGrainTexture(def.grain, tileW, tileH);
     params.roughnessMap = tex;
-    // Blend grain with color
+    // Blend grain with color via diffuse map
     const grainTex = makeGrainTexture(def.grain, tileW, tileH);
     grainTex.colorSpace = THREE.SRGBColorSpace;
+    params.map = grainTex;
   }
 
   const mat = new THREE.MeshPhysicalMaterial(params);
