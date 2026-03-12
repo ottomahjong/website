@@ -1461,8 +1461,6 @@ function buildTile(exploded = false) {
   tileMeshes = [];
 
   const { width: W, height: H, depth: D, cornerRadius: R } = state.tile;
-  // Bevel size: 40% of corner radius, max 2mm — kept subtle.
-  const BEVEL = Math.min(R * 0.4, 2.0);
 
   // Validate and auto-adjust layer thicknesses
   validateThicknesses();
@@ -1478,19 +1476,15 @@ function buildTile(exploded = false) {
 
   visibleLayers.forEach(({ layer, i }, visibleIdx) => {
     const t = layer.thickness;
-    const isFirst = (visibleIdx === 0);
     const isLast  = (visibleIdx === totalVisible - 1);
 
     // ExtrudeGeometry along Z, then rotate -90° X so it lies flat (Z→Y).
-    // Bevel only on the externally-visible cap face of first/last layers.
+    // No bevel — rounded corners come entirely from the 2D shape profile.
+    // All layers use the same W/H/R so sides are perfectly flush.
     const shape = makeRoundedRectShape(W * UNIT, H * UNIT, R * UNIT);
     const geo = new THREE.ExtrudeGeometry(shape, {
-      depth:          t * UNIT,
-      bevelEnabled:   isFirst || isLast,
-      bevelThickness: (isFirst || isLast) ? BEVEL * UNIT : 0,
-      bevelSize:      (isFirst || isLast) ? BEVEL * UNIT : 0,
-      bevelOffset:    0,
-      bevelSegments:  2,
+      depth:        t * UNIT,
+      bevelEnabled: false,
     });
     // Rotate so extrusion axis (Z) aligns with scene Y (vertical).
     geo.rotateX(-Math.PI / 2);
@@ -2348,11 +2342,7 @@ const flatLaySys = {
 
     // Build geometry + InstancedMesh per layer using rounded shape (matches single-tile view)
     const { cornerRadius: R } = state.tile;
-    const BEVEL = Math.min(R * 0.4, 2.0);
-    const visLayersFL = state.layers
-      .map((layer, i) => ({ layer, i }))
-      .filter(({ layer, i }) => !(i === 2 && !layer.visible));
-    const totalVisFL = visLayersFL.length;
+    const totalVisFL = state.layers.filter((l, i) => !(i === 2 && !l.visible)).length;
 
     let yOffset = -D / 2;
     let flVisIdx = 0;
@@ -2360,18 +2350,13 @@ const flatLaySys = {
       const t = layer.thickness;
       if (li === 2 && !layer.visible) { yOffset += t; return; }
 
-      const isFirstFL = (flVisIdx === 0);
-      const isLastFL  = (flVisIdx === totalVisFL - 1);
+      const isLastFL = (flVisIdx === totalVisFL - 1);
       flVisIdx++;
 
       const tileShape = makeRoundedRectShape(W, H, R);
       const geo = new THREE.ExtrudeGeometry(tileShape, {
-        depth:          t,
-        bevelEnabled:   isFirstFL || isLastFL,
-        bevelThickness: (isFirstFL || isLastFL) ? BEVEL : 0,
-        bevelSize:      (isFirstFL || isLastFL) ? BEVEL : 0,
-        bevelOffset:    0,
-        bevelSegments:  2,
+        depth:        t,
+        bevelEnabled: false,
       });
       geo.rotateX(-Math.PI / 2);
       geo.translate(0, -t / 2, 0);
