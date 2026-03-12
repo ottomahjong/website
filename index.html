@@ -406,6 +406,24 @@ input[type="checkbox"] {
   color: var(--text-secondary);
 }
 
+/* ── Material type + finish buttons ── */
+.mat-type-btn, .mat-finish-btn {
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border, #444);
+  border-radius: 4px;
+  background: var(--surface2, #1e1e2e);
+  color: var(--text-secondary, #aaa);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.mat-type-btn.active, .mat-finish-btn.active {
+  background: var(--accent, #6c63ff);
+  border-color: var(--accent, #6c63ff);
+  color: #fff;
+}
+.mat-type-btn:hover, .mat-finish-btn:hover { border-color: var(--accent, #6c63ff); }
+
 /* ── Visual Stack Diagram ── */
 #stack-diagram {
   display: flex;
@@ -896,18 +914,13 @@ input[type="checkbox"] {
           <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
         </div>
         <div class="field-row">
-          <label for="dim-radius">Corner r.</label>
-          <input type="number" id="dim-radius" value="4" min="0" max="15" step="0.5" aria-label="Corner radius in mm">
+          <label for="dim-bevel-radius">Edge bevel</label>
+          <input type="number" id="dim-bevel-radius" value="2" min="0.1" max="8" step="0.25" aria-label="Edge bevel radius in mm">
           <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
         </div>
         <div class="field-row">
-          <label for="dim-edge-radius">Edge r.</label>
-          <input type="number" id="dim-edge-radius" value="1.5" min="0" max="6" step="0.25" aria-label="Edge radius in mm">
-          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
-        </div>
-        <div class="field-row">
-          <label for="dim-corner-segs">Segments</label>
-          <input type="number" id="dim-corner-segs" value="8" min="2" max="24" step="1" aria-label="Curve segments">
+          <label for="dim-bevel-segs">Smoothness</label>
+          <input type="number" id="dim-bevel-segs" value="8" min="2" max="16" step="1" aria-label="Bevel segments">
           <span style="font-size:0.75rem;color:var(--text-secondary);"></span>
         </div>
         <!-- Scale reference -->
@@ -1147,6 +1160,7 @@ input[type="checkbox"] {
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 
@@ -1158,17 +1172,16 @@ import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 // ─────────────────────────────────────────────────────────────
 const state = {
   // Physical dimensions (millimeters)
-  tile: { width: 36, height: 47, depth: 22, cornerRadius: 4, edgeRadius: 1.5, cornerSegments: 8 },
+  tile: { width: 36, height: 47, depth: 22, bevelRadius: 2, bevelSegments: 8 },
 
-  // Four layers: Base, Body, Inlay, Cap (bottom to top)
-  // Thicknesses must sum to tile.depth
-  // material: key from MATERIALS object
-  // color: hex string
+  // Layers: bottom to top, thicknesses sum to tile.depth.
+  // material: key from MATERIALS ('resin'|'acrylic'|'metallic'|'wood')
+  // finish: 'matte'|'gloss'
   layers: [
-    { name: 'Base',  thickness: 8,  material: 'resin-matte',   color: '#E8EEF2', visible: true,  expanded: false },
-    { name: 'Body',  thickness: 10, material: 'resin-gloss',   color: '#1A2137', visible: true,  expanded: false },
-    { name: 'Inlay', thickness: 2,  material: 'metal-brushed', color: '#AF6B4F', visible: true,  expanded: false },
-    { name: 'Cap',   thickness: 2,  material: 'acrylic-clear', color: '#F5E8DC', visible: true,  expanded: false, opacity: 85 },
+    { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false },
+    { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false },
+    { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false },
+    { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85 },
   ],
 
   // Face design elements array — each element has:
@@ -1202,63 +1215,13 @@ const state = {
 
 // ─────────────────────────────────────────────────────────────
 // MATERIAL DEFINITIONS
-// Each entry is a PBR preset for MeshPhysicalMaterial.
-// To add a new material: add an entry here, add it to the
-// select dropdowns in buildLayerUI(), and it will work.
-// The 'label' is what users see. The 'params' object maps
-// directly to MeshPhysicalMaterial constructor options.
+// Each entry has matte and gloss sub-objects with PBR params.
 // ─────────────────────────────────────────────────────────────
 const MATERIALS = {
-  'resin-matte': {
-    label: 'Resin (matte)',
-    params: { roughness: 0.85, metalness: 0.0 },
-    grain: null
-  },
-  'resin-gloss': {
-    label: 'Resin (gloss)',
-    params: { roughness: 0.05, metalness: 0.0, clearcoat: 1.0, clearcoatRoughness: 0.05 },
-    grain: null
-  },
-  'wood-matte': {
-    label: 'Wood (matte)',
-    params: { roughness: 0.9, metalness: 0.0 },
-    grain: 'wood'
-  },
-  'wood-oiled': {
-    label: 'Wood (oiled)',
-    params: { roughness: 0.4, metalness: 0.0, clearcoat: 0.4, clearcoatRoughness: 0.2 },
-    grain: 'wood'
-  },
-  'metal-brushed': {
-    label: 'Metal (brushed)',
-    params: { roughness: 0.4, metalness: 1.0 },
-    grain: 'metal'
-  },
-  'metal-polished': {
-    label: 'Metal (polished)',
-    params: { roughness: 0.05, metalness: 1.0, envMapIntensity: 2.0 },
-    grain: null
-  },
-  'acrylic-clear': {
-    label: 'Acrylic (clear)',
-    params: { roughness: 0.0, metalness: 0.0, transmission: 0.88, thickness: 3, ior: 1.5, transparent: true, opacity: 0.92 },
-    grain: null
-  },
-  'acrylic-frosted': {
-    label: 'Acrylic (frosted)',
-    params: { roughness: 0.3, metalness: 0.0, transmission: 0.6, thickness: 2, transparent: true },
-    grain: null
-  },
-  'melamine': {
-    label: 'Melamine',
-    params: { roughness: 0.75, metalness: 0.0, sheen: 0.3, sheenRoughness: 0.8 },
-    grain: null
-  },
-  'veneer': {
-    label: 'Veneer',
-    params: { roughness: 0.6, metalness: 0.0, clearcoat: 0.3, clearcoatRoughness: 0.4 },
-    grain: 'veneer'
-  },
+  'resin':    { label: 'Resin',    matte: { roughness: 0.85, metalness: 0.0 },                                              gloss: { roughness: 0.05, metalness: 0.0, clearcoat: 1.0, clearcoatRoughness: 0.03 } },
+  'acrylic':  { label: 'Acrylic',  matte: { roughness: 0.4,  metalness: 0.0, transmission: 0.6,  thickness: 3, ior: 1.49, transparent: true }, gloss: { roughness: 0.0,  metalness: 0.0, transmission: 0.92, thickness: 3, ior: 1.49, transparent: true } },
+  'metallic': { label: 'Metallic', matte: { roughness: 0.6,  metalness: 1.0 },                                              gloss: { roughness: 0.05, metalness: 1.0, envMapIntensity: 2.0 } },
+  'wood':     { label: 'Wood',     matte: { roughness: 0.9,  metalness: 0.0 },                                              gloss: { roughness: 0.3,  metalness: 0.0, clearcoat: 0.5, clearcoatRoughness: 0.3 } },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -1383,175 +1346,121 @@ function makeGrainTexture(type, tileW, tileH) {
 // ─────────────────────────────────────────────────────────────
 // MATERIAL FACTORY
 // Creates a THREE.MeshPhysicalMaterial from a MATERIALS preset.
-// layerColor is applied as the base color.
-// opacity is 0–100 for the Cap layer.
+// materialKey: 'resin' | 'acrylic' | 'metallic' | 'wood'
+// finish: 'matte' | 'gloss'
+// color: hex string
+// opacity: 0–100 (only applied for non-transmissive materials)
 // ─────────────────────────────────────────────────────────────
-function makeMaterial(materialKey, layerColor, opacity = 100, tileW = 36, tileH = 47) {
-  const def = MATERIALS[materialKey] || MATERIALS['resin-matte'];
-  const params = { ...def.params };
+function makeMaterial(materialKey, finish, color, opacity = 100) {
+  const def = MATERIALS[materialKey] || MATERIALS['resin'];
+  const params = { ...def[finish] || def.gloss };
 
-  params.color = new THREE.Color(layerColor);
+  params.color = new THREE.Color(color);
 
-  // For physically transmissive materials, transmission already controls
-  // transparency — applying alpha-blend opacity on top conflicts with the
-  // transmission render path and makes the material render as a flat
-  // semi-transparent veil instead of glass. Only apply opacity override
-  // for non-transmissive materials.
+  // For transmissive materials, transmission controls transparency —
+  // skip alpha-blend opacity to avoid conflicting with the render path.
   if (opacity < 100 && !params.transmission) {
     params.transparent = true;
     params.opacity = opacity / 100;
   }
 
-  // Apply grain texture as roughness map + diffuse map (tinted)
-  if (def.grain) {
-    const tex = makeGrainTexture(def.grain, tileW, tileH);
-    params.roughnessMap = tex;
-    // Blend grain with color via diffuse map
-    const grainTex = makeGrainTexture(def.grain, tileW, tileH);
-    grainTex.colorSpace = THREE.SRGBColorSpace;
-    params.map = grainTex;
-  }
-
-  const mat = new THREE.MeshPhysicalMaterial(params);
-  return mat;
+  return new THREE.MeshPhysicalMaterial(params);
 }
 
 // ─────────────────────────────────────────────────────────────
 // TILE GEOMETRY BUILDER
-// Constructs the 4-layer tile from state.
-// Each layer is a custom chamfered box (straight vertical sides,
-// Call this whenever dimensions or layers change.
-//
-// Exploded mode: layers are spread apart vertically.
-// To adjust explode gap: change EXPLODE_GAP below.
+// Single RoundedBoxGeometry mesh with material groups assigned
+// by Y-centroid binning (one group per layer).
 // ─────────────────────────────────────────────────────────────
-const EXPLODE_GAP = 8; // mm gap between layers in exploded view
+const EXPLODE_GAP = 8; // kept for legacy reference, not used
 const UNIT = 1;        // 1 unit = 1 mm in scene space
 
-// ─────────────────────────────────────────────────────────────
-// ROUNDED RECT SHAPE
-// Creates a THREE.Shape for use with ExtrudeGeometry.
-// W, H, R are in scene units (mm × UNIT).
-// ─────────────────────────────────────────────────────────────
-// segs controls the arc smoothness (passed to ExtrudeGeometry as curveSegments).
-// Uses absarc so the segment count is controllable.
-function makeRoundedRectShape(W, H, R, segs) {
-  const r = Math.min(R, W / 2 - 0.01, H / 2 - 0.01);
-  const shape = new THREE.Shape();
-  shape.absarc( W/2 - r,  H/2 - r, r, 0,           Math.PI / 2,     false);
-  shape.absarc(-W/2 + r,  H/2 - r, r, Math.PI / 2, Math.PI,         false);
-  shape.absarc(-W/2 + r, -H/2 + r, r, Math.PI,     3 * Math.PI / 2, false);
-  shape.absarc( W/2 - r, -H/2 + r, r, 3 * Math.PI / 2, 2 * Math.PI, false);
-  return shape;
+// Assigns geometry groups by binning each triangle's Y-centroid
+// into a layer boundary bucket, then rebuilds the index buffer
+// as contiguous groups. boundaries: cumulative Y values from bottom.
+function assignLayerGroups(geo, boundaries) {
+  const posAttr = geo.attributes.position;
+  const srcIdx  = geo.index.array;
+  const nTri    = srcIdx.length / 3;
+  const nLayers = boundaries.length - 1;
+
+  const buckets = Array.from({ length: nLayers }, () => []);
+  for (let t = 0; t < nTri; t++) {
+    const i0 = srcIdx[t * 3], i1 = srcIdx[t * 3 + 1], i2 = srcIdx[t * 3 + 2];
+    const cy = (posAttr.getY(i0) + posAttr.getY(i1) + posAttr.getY(i2)) / 3;
+    let bucket = nLayers - 1;
+    for (let b = 0; b < nLayers - 1; b++) {
+      if (cy < boundaries[b + 1] - 0.001) { bucket = b; break; }
+    }
+    buckets[bucket].push(i0, i1, i2);
+  }
+
+  const newIdx = new Uint32Array(srcIdx.length);
+  let cursor = 0;
+  geo.clearGroups();
+  for (let b = 0; b < nLayers; b++) {
+    const start = cursor;
+    for (const idx of buckets[b]) newIdx[cursor++] = idx;
+    if (buckets[b].length > 0) geo.addGroup(start, buckets[b].length, b);
+  }
+  geo.setIndex(new THREE.BufferAttribute(newIdx, 1));
+  geo.computeVertexNormals();
 }
 
-// (old makeTileLayerGeometry replaced by makeRoundedRectShape + ExtrudeGeometry in buildTile)
-// All four layers share the same W×H XZ footprint so sides
-// are perfectly flush — the result looks like one solid tile.
-//
-// bevelSize: chamfer size in mm (affects how large the bevel is)
-// bevelTop/bevelBottom: which face(s) get the chamfer
-//
-// (old makeTileLayerGeometry removed — see makeRoundedRectShape above)
-
-let tileMeshes = [];   // current layer meshes
-let tileIsExploded = false;
+let tileMesh = null;   // single tile mesh
+let tileIsExploded = false; // tracked but unused with single-mesh approach
 
 function buildTile(exploded = false) {
   tileIsExploded = exploded;
-  // Clear existing
-  tileMeshes.forEach(m => {
-    tileGroup.remove(m);
-    m.geometry.dispose();
-    if (m.material) m.material.dispose();
-  });
-  tileMeshes = [];
+  // Clear existing mesh
+  if (tileMesh) {
+    tileGroup.remove(tileMesh);
+    tileMesh.geometry.dispose();
+    if (Array.isArray(tileMesh.material)) tileMesh.material.forEach(m => m.dispose());
+    else if (tileMesh.material) tileMesh.material.dispose();
+    tileMesh = null;
+  }
 
-  const { width: W, height: H, depth: D, cornerRadius: R,
-          edgeRadius: ER, cornerSegments: segs } = state.tile;
+  const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
 
-  // Validate and auto-adjust layer thicknesses
   validateThicknesses();
 
-  // Determine which layers are visible
-  const visibleLayers = state.layers
-    .map((layer, i) => ({ layer, i }))
-    .filter(({ layer, i }) => !(i === 2 && !layer.visible));
-  const totalVisible = visibleLayers.length;
+  const layers = state.layers;
+  const heightSegs = Math.max(layers.length * 4, 8);
 
-  // Build cumulative Y positions (bottom-up)
-  let yOffset = -D / 2; // start at bottom of tile
+  // RoundedBoxGeometry: X=width, Y=depth (stacking axis), Z=height
+  const geo = new RoundedBoxGeometry(
+    W * UNIT, D * UNIT, H * UNIT,
+    4, heightSegs, 4,
+    Math.max(0.01, BR) * UNIT
+  );
 
-  visibleLayers.forEach(({ layer, i }, visibleIdx) => {
-    const t = layer.thickness;
-    const isFirst = (visibleIdx === 0);
-    const isLast  = (visibleIdx === totalVisible - 1);
+  // Cumulative Y boundaries (geometry centered at Y=0)
+  const totalD = layers.reduce((s, l) => s + l.thickness, 0);
+  const boundaries = [];
+  let yAcc = -totalD / 2;
+  boundaries.push(yAcc * UNIT);
+  for (const layer of layers) {
+    yAcc += layer.thickness;
+    boundaries.push(yAcc * UNIT);
+  }
 
-    // All layers use the same rounded-rect profile so vertical walls are perfectly flush.
-    // Cap (topmost) and Base (bottommost) get an edge bevel on their outward face only.
-    // Middle layers: straight extrusion, no bevel.
-    const shape = makeRoundedRectShape(W * UNIT, H * UNIT, R * UNIT, segs);
-    let geo;
+  assignLayerGroups(geo, boundaries);
 
-    if ((isFirst || isLast) && ER > 0) {
-      // Extrude with bevel on both ends, then orient so the bevel appears only
-      // on the externally-visible face (top for Cap, bottom for Base).
-      geo = new THREE.ExtrudeGeometry(shape, {
-        depth:          t * UNIT,
-        bevelEnabled:   true,
-        bevelThickness: ER * UNIT,
-        bevelSize:      ER * UNIT,
-        bevelSegments:  segs,
-        bevelOffset:    0,
-        curveSegments:  segs,
-      });
-      geo.rotateX(-Math.PI / 2);
-      // After rotation: z=0 face (bevel) → y=0 (bottom), z=t face (bevel) → y=t (top).
-      if (isLast) {
-        // Cap: flip so the z=0 bevel face ends up at the TOP (visible lip).
-        // scale(1,-1,1) maps y→-y, then translate(0,t,0) shifts back into [0,t].
-        geo.scale(1, -1, 1);
-        geo.translate(0, t * UNIT, 0);
-      }
-      // Base: no flip — z=0 bevel face is already at y=0 (the visible bottom lip).
-    } else {
-      geo = new THREE.ExtrudeGeometry(shape, {
-        depth:         t * UNIT,
-        bevelEnabled:  false,
-        curveSegments: segs,
-      });
-      geo.rotateX(-Math.PI / 2);
-    }
-    // Center geometry vertically around y=0 so mesh.position.y = layer centre.
-    geo.translate(0, -t * UNIT / 2, 0);
-
-    // Cap (topmost visible) gets its opacity applied; all others are fully opaque.
-    const opacity = isLast ? (layer.opacity ?? 100) : 100;
-    const mat = makeMaterial(layer.material, layer.color, opacity, W, H);
-
-    const mesh = new THREE.Mesh(geo, mat);
-
-    // Position: center of this layer in scene Y
-    const layerCenterY = yOffset + t / 2;
-    mesh.position.y = layerCenterY * UNIT;
-
-    if (exploded) {
-      mesh.position.y += i * EXPLODE_GAP * UNIT;
-    }
-
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.name = layer.name;
-
-    tileGroup.add(mesh);
-    tileMeshes.push(mesh);
-
-    yOffset += t;
+  // Material array: index 0 = base/bottom, last = cap/top
+  const materials = layers.map((layer, i) => {
+    const isTop = (i === layers.length - 1);
+    const opacity = isTop ? (layer.opacity ?? 100) : 100;
+    return makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
   });
 
-  // Apply face design texture to Cap layer (topmost visible mesh)
-  applyDesignTexture();
+  tileMesh = new THREE.Mesh(geo, materials);
+  tileMesh.castShadow = true;
+  tileMesh.receiveShadow = true;
+  tileMesh.name = 'tile';
+  tileGroup.add(tileMesh);
 
+  applyDesignTexture();
   updateStackDiagram();
 }
 
@@ -1567,17 +1476,26 @@ function validateThicknesses() {
   const warning = document.getElementById('thickness-warning');
 
   if (Math.abs(total - target) > 0.01) {
-    // Auto-adjust body layer
-    const otherSum = state.layers.reduce((s, l, i) => i !== 1 ? s + l.thickness : s, 0);
-    const newBody = Math.max(0.5, target - otherSum);
-    state.layers[1].thickness = Math.round(newBody * 10) / 10;
-    warning.style.display = 'block';
-    // Update UI
-    const inp = document.querySelector('[data-layer-thickness="1"]');
-    if (inp) inp.value = state.layers[1].thickness;
+    // Auto-adjust the thickest middle layer, or layer 0 if only 1 layer
+    const n = state.layers.length;
+    let adjustIdx = 0;
+    if (n >= 3) {
+      // Find thickest middle layer (not first or last)
+      let maxT = -1;
+      for (let i = 1; i < n - 1; i++) {
+        if (state.layers[i].thickness > maxT) { maxT = state.layers[i].thickness; adjustIdx = i; }
+      }
+    } else if (n === 2) {
+      adjustIdx = 1;
+    }
+    const otherSum = state.layers.reduce((s, l, i) => i !== adjustIdx ? s + l.thickness : s, 0);
+    state.layers[adjustIdx].thickness = Math.round(Math.max(0.5, target - otherSum) * 10) / 10;
+    if (warning) warning.style.display = 'block';
+    const inp = document.querySelector(`[data-layer-thickness="${adjustIdx}"]`);
+    if (inp) inp.value = state.layers[adjustIdx].thickness;
     updateStackDiagram();
   } else {
-    warning.style.display = 'none';
+    if (warning) warning.style.display = 'none';
   }
 }
 
@@ -1721,9 +1639,10 @@ function updateLights() {
   }
 
   // Update env map intensity on all materials
-  tileMeshes.forEach(m => {
-    if (m.material) m.material.envMapIntensity = s.envIntensity;
-  });
+  if (tileMesh) {
+    const mats = Array.isArray(tileMesh.material) ? tileMesh.material : [tileMesh.material];
+    mats.forEach(m => { if (m) m.envMapIntensity = s.envIntensity; });
+  }
 
   renderer.toneMappingExposure = state.lighting.preset === 'studio' ? 1.0 : 1.2;
 }
@@ -2277,23 +2196,29 @@ const designSys = {
     this.draw(); // render that face's elements to this.canvas
 
     const isFaceA = face === 'A';
-    // Face A → Cap layer (last mesh), Face B → Base layer (first mesh)
-    const mesh = isFaceA
-      ? tileMeshes[tileMeshes.length - 1]
-      : tileMeshes[0];
+    // Single mesh with material array: Face A → last material (cap/top), Face B → material[0] (base)
+    let mat = null;
+    if (tileMesh) {
+      const mats = tileMesh.material;
+      if (Array.isArray(mats)) {
+        mat = isFaceA ? mats[mats.length - 1] : mats[0];
+      } else {
+        mat = mats;
+      }
+    }
 
-    if (mesh && mesh.material) {
+    if (mat) {
       const colorTex = new THREE.CanvasTexture(this.canvas);
       colorTex.colorSpace = THREE.SRGBColorSpace;
       colorTex.needsUpdate = true;
-      mesh.material.map = colorTex;
+      mat.map = colorTex;
 
       const normalCanvas = this.generateNormalMap(3.0);
       const normalTex = new THREE.CanvasTexture(normalCanvas);
       normalTex.needsUpdate = true;
-      mesh.material.normalMap = normalTex;
-      mesh.material.normalScale = new THREE.Vector2(1, 1);
-      mesh.material.needsUpdate = true;
+      mat.normalMap = normalTex;
+      mat.normalScale = new THREE.Vector2(1, 1);
+      mat.needsUpdate = true;
     }
 
     // Restore active face and redraw current face
@@ -2359,89 +2284,72 @@ const flatLaySys = {
     this.clear();
     if (state.view.mode === 'single') return;
 
-    const { width: W, height: H, depth: D } = state.tile;
+    const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
     const count = state.flatlay.count;
     const gap   = state.flatlay.gap;
     const isIso = state.view.mode === 'iso-flatlay';
-    // Flat lay uses plain BoxGeometry (no bevel) for performance — one draw call per layer.
-    // To add bevels here: replace THREE.BoxGeometry with makeTileLayerGeometry.
 
     validateThicknesses();
     const rand = this.rng(42);
     const rotRange = 2 * Math.PI / 180; // ±2°
 
-    // Compute grid dimensions
     const cols = Math.ceil(Math.sqrt(count * W / H));
     const rows = Math.ceil(count / cols);
 
-    // Build geometry + InstancedMesh per layer using rounded shape (matches single-tile view)
-    const { cornerRadius: R, cornerSegments: segsFL } = state.tile;
-    const totalVisFL = state.layers.filter((l, i) => !(i === 2 && !l.visible)).length;
+    // Single shared RoundedBoxGeometry with layer groups (same as buildTile)
+    const layers = state.layers;
+    const heightSegs = Math.max(layers.length * 4, 8);
+    const geo = new RoundedBoxGeometry(
+      W * UNIT, D * UNIT, H * UNIT,
+      4, heightSegs, 4,
+      Math.max(0.01, BR) * UNIT
+    );
 
-    let yOffset = -D / 2;
-    let flVisIdx = 0;
-    state.layers.forEach((layer, li) => {
-      const t = layer.thickness;
-      if (li === 2 && !layer.visible) { yOffset += t; return; }
+    const totalD = layers.reduce((s, l) => s + l.thickness, 0);
+    const boundaries = [];
+    let yAcc = -totalD / 2;
+    boundaries.push(yAcc * UNIT);
+    for (const layer of layers) {
+      yAcc += layer.thickness;
+      boundaries.push(yAcc * UNIT);
+    }
+    assignLayerGroups(geo, boundaries);
 
-      const isLastFL = (flVisIdx === totalVisFL - 1);
-      flVisIdx++;
-
-      const tileShape = makeRoundedRectShape(W, H, R, segsFL);
-      const geo = new THREE.ExtrudeGeometry(tileShape, {
-        depth:         t,
-        bevelEnabled:  false,
-        curveSegments: segsFL,
-      });
-      geo.rotateX(-Math.PI / 2);
-      geo.translate(0, -t / 2, 0);
-      const opacity = isLastFL ? (layer.opacity ?? 100) : 100;
-      const mat = makeMaterial(layer.material, layer.color, opacity, W, H);
-
-      const iMesh = new THREE.InstancedMesh(geo, mat, count);
-      iMesh.castShadow = false;
-      iMesh.receiveShadow = true;
-
-      const layerY = (yOffset + t / 2);
-      const dummy = new THREE.Object3D();
-      let idx = 0;
-
-      for (let row = 0; row < rows && idx < count; row++) {
-        for (let col = 0; col < cols && idx < count; col++) {
-          // Position in mm
-          let px = col * (W + gap);
-          let pz = row * (H + gap);
-
-          if (isIso) {
-            // Stagger odd rows
-            if (row % 2 === 1) px += (W + gap) * 0.5;
-          }
-
-          // Center the whole grid
-          const totalW = (cols - 1) * (W + gap) + (isIso ? (W + gap) * 0.5 : 0);
-          const totalH = (rows - 1) * (H + gap);
-          const cx = px - totalW / 2;
-          const cz = pz - totalH / 2;
-
-          // Slight random in-plane rotation (seeded)
-          const rot = (rand() - 0.5) * 2 * rotRange;
-
-          dummy.position.set(cx, layerY, cz);
-          dummy.rotation.set(0, rot, 0);
-          dummy.updateMatrix();
-          iMesh.setMatrixAt(idx, dummy.matrix);
-          idx++;
-        }
-      }
-
-      iMesh.instanceMatrix.needsUpdate = true;
-      iMesh.count = idx;
-      flatLayGroup.add(iMesh);
-      this.meshes.push(iMesh);
-
-      yOffset += t;
+    const materials = layers.map((layer, i) => {
+      const isTop = (i === layers.length - 1);
+      const opacity = isTop ? (layer.opacity ?? 100) : 100;
+      return makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
     });
 
+    // One InstancedMesh for the whole tile (multi-material)
+    const iMesh = new THREE.InstancedMesh(geo, materials, count);
+    iMesh.castShadow = false;
+    iMesh.receiveShadow = true;
+
+    const dummy = new THREE.Object3D();
+    let idx = 0;
+    for (let row = 0; row < rows && idx < count; row++) {
+      for (let col = 0; col < cols && idx < count; col++) {
+        let px = col * (W + gap);
+        let pz = row * (H + gap);
+        if (isIso && row % 2 === 1) px += (W + gap) * 0.5;
+
+        const totalW = (cols - 1) * (W + gap) + (isIso ? (W + gap) * 0.5 : 0);
+        const totalH = (rows - 1) * (H + gap);
+        const rot = (rand() - 0.5) * 2 * rotRange;
+
+        dummy.position.set(px - totalW / 2, 0, pz - totalH / 2);
+        dummy.rotation.set(0, rot, 0);
+        dummy.updateMatrix();
+        iMesh.setMatrixAt(idx, dummy.matrix);
+        idx++;
+      }
+    }
+
+    iMesh.instanceMatrix.needsUpdate = true;
+    iMesh.count = idx;
+    flatLayGroup.add(iMesh);
+    this.meshes.push(iMesh);
     this.count = count;
   },
 
@@ -2449,7 +2357,8 @@ const flatLaySys = {
     this.meshes.forEach(m => {
       flatLayGroup.remove(m);
       m.geometry.dispose();
-      if (m.material) m.material.dispose();
+      if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
+      else if (m.material) m.material.dispose();
     });
     this.meshes = [];
   },
@@ -2606,7 +2515,7 @@ const exportSys = {
   // To add a third face: extend faceToSVG and add another download call.
   exportSVG() {
     const { width: W, height: H } = state.tile;
-    const CR = state.tile.cornerRadius;
+    const CR = state.tile.bevelRadius || 2;
 
     function faceToSVG(elements, bgColor, label) {
       let paths = '';
@@ -2653,7 +2562,7 @@ const exportSys = {
       <tr>
         <td>${l.name}</td>
         <td>${l.thickness}mm</td>
-        <td>${MATERIALS[l.material]?.label || l.material}</td>
+        <td>${MATERIALS[l.material]?.label || l.material} (${l.finish || 'gloss'})</td>
         <td><span style="display:inline-block;width:16px;height:16px;background:${l.color};border:1px solid #ccc;vertical-align:middle;border-radius:2px;"></span> ${l.color}</td>
       </tr>`).join('');
 
@@ -2683,7 +2592,7 @@ const exportSys = {
   <tr><td>Width</td><td>${t.width}mm</td></tr>
   <tr><td>Height</td><td>${t.height}mm</td></tr>
   <tr><td>Total Depth</td><td>${t.depth}mm</td></tr>
-  <tr><td>Corner Radius</td><td>${t.cornerRadius}mm</td></tr>
+  <tr><td>Edge Bevel</td><td>${t.bevelRadius}mm (${t.bevelSegments} segs)</td></tr>
   <tr><td>Engraving Depth</td><td>${state.engravingDepth}mm</td></tr>
 </table>
 
@@ -2755,12 +2664,12 @@ const presetSys = {
     name: 'Night Table',
     desc: 'Otto Mahjong original spec',
     config: {
-      tile: { width: 36, height: 47, depth: 22, cornerRadius: 4, edgeRadius: 1.5, cornerSegments: 8 },
+      tile: { width: 36, height: 47, depth: 22, bevelRadius: 2, bevelSegments: 8 },
       layers: [
-        { name: 'Base',  thickness: 8,  material: 'resin-matte',   color: '#E8EEF2', visible: true, expanded: false },
-        { name: 'Body',  thickness: 10, material: 'resin-gloss',   color: '#1A2137', visible: true, expanded: false },
-        { name: 'Inlay', thickness: 2,  material: 'metal-brushed', color: '#AF6B4F', visible: true, expanded: false },
-        { name: 'Cap',   thickness: 2,  material: 'acrylic-clear', color: '#F5E8DC', visible: true, expanded: false, opacity: 85 },
+        { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false },
+        { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false },
+        { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false },
+        { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85 },
       ],
       engravingDepth: 0.5,
       lighting: { preset: 'studio', keyIntensity: 2.5, fillIntensity: 0.4, ambientIntensity: 0.05, envIntensity: 1.0 },
@@ -2852,23 +2761,29 @@ function buildLayerUI() {
   if (!stack) return;
   stack.innerHTML = '';
 
-  const matOptions = Object.entries(MATERIALS)
-    .map(([k, v]) => `<option value="${k}">${v.label}</option>`)
-    .join('');
-
   const lastIdx = state.layers.length - 1;
   const canAdd = state.layers.length < 4;
-  const canRemove = state.layers.length > 2;
+  const canRemove = state.layers.length > 1;
 
   state.layers.forEach((layer, i) => {
     const isBase = (i === 0);
     const isCap  = (i === lastIdx);
-    // Locked: Base (always index 0) and topmost Cap (always lastIdx)
     const isLocked = isBase || isCap;
-    // Inlay visibility toggle: layers that are neither base nor cap (middle layers)
-    const showVisToggle = !isBase && !isCap;
-    // Opacity control: cap (last visible layer) only
     const showOpacity = isCap;
+    const finish = layer.finish || 'gloss';
+    const matKey = layer.material || 'resin';
+
+    // Material type buttons
+    const matBtns = Object.entries(MATERIALS).map(([k, v]) =>
+      `<button type="button" class="mat-type-btn${k === matKey ? ' active' : ''}"
+        data-layer-mat="${i}" data-mat-key="${k}" title="${v.label}">${v.label}</button>`
+    ).join('');
+
+    // Finish toggle buttons
+    const finishBtns = ['matte', 'gloss'].map(f =>
+      `<button type="button" class="mat-finish-btn${f === finish ? ' active' : ''}"
+        data-layer-finish="${i}" data-finish-val="${f}">${f.charAt(0).toUpperCase() + f.slice(1)}</button>`
+    ).join('');
 
     const card = document.createElement('div');
     card.className = 'layer-card';
@@ -2880,7 +2795,6 @@ function buildLayerUI() {
         <div class="layer-color-swatch" id="swatch-${i}" style="background:${layer.color}"></div>
         <span class="layer-name">${layer.name}</span>
         <span class="layer-thickness-badge" id="badge-${i}">${layer.thickness}mm</span>
-        ${showVisToggle ? `<button class="layer-visible-toggle" data-layer-vis="${i}" aria-label="Toggle ${layer.name} visibility" title="Toggle visibility">${layer.visible ? '◉' : '○'}</button>` : ''}
         ${(!isLocked && canRemove) ? `<button class="layer-remove-btn" data-layer-remove="${i}" aria-label="Remove ${layer.name}" title="Remove layer" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:0.9rem;padding:0 2px;line-height:1;">✕</button>` : ''}
         <span style="font-size:0.7rem;color:var(--text-secondary);margin-left:2px;">${layer.expanded ? '▾' : '▸'}</span>
       </div>
@@ -2892,11 +2806,13 @@ function buildLayerUI() {
                  aria-label="${layer.name} thickness in mm">
           <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
         </div>
-        <div class="layer-row">
-          <label for="layer-mat-${i}">Material</label>
-          <select id="layer-mat-${i}" data-layer-mat="${i}" aria-label="${layer.name} material">
-            ${matOptions.replace(`value="${layer.material}"`, `value="${layer.material}" selected`)}
-          </select>
+        <div class="layer-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label style="margin-bottom:2px;">Material</label>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;">${matBtns}</div>
+        </div>
+        <div class="layer-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label style="margin-bottom:2px;">Finish</label>
+          <div style="display:flex;gap:4px;">${finishBtns}</div>
         </div>
         <div class="layer-row">
           <label for="layer-color-${i}">Color</label>
@@ -2925,9 +2841,10 @@ function buildLayerUI() {
     addBtn.style.cssText = 'width:100%;margin-top:6px;padding:6px 0;background:var(--surface2,#2a2a3a);border:1px dashed var(--border,#444);border-radius:6px;color:var(--text-secondary,#aaa);cursor:pointer;font-size:0.8rem;';
     addBtn.addEventListener('click', () => {
       if (state.layers.length >= 4) return;
-      // Insert above Base (at index 1)
-      state.layers.splice(1, 0, {
-        name: 'Layer', thickness: 2, material: 'resin-matte',
+      // Insert before the last (Cap) layer
+      const insertIdx = state.layers.length - 1;
+      state.layers.splice(insertIdx, 0, {
+        name: 'Layer', thickness: 2, material: 'resin', finish: 'gloss',
         color: '#888888', visible: true, expanded: false
       });
       validateThicknesses();
@@ -2951,13 +2868,6 @@ function buildLayerUI() {
       updateFlatLay();
     }
 
-    if (el.dataset.layerMat !== undefined) {
-      const i = parseInt(el.dataset.layerMat);
-      state.layers[i].material = el.value;
-      buildTile(tileIsExploded);
-      updateFlatLay();
-    }
-
     if (el.dataset.layerColor !== undefined) {
       const i = parseInt(el.dataset.layerColor);
       state.layers[i].color = el.value;
@@ -2965,7 +2875,6 @@ function buildLayerUI() {
       buildTile(tileIsExploded);
       updateStackDiagram();
       updateFlatLay();
-      // Update design bg when cap or base color changes
       if (i === state.layers.length - 1 || i === 0) designSys.draw();
     }
 
@@ -2979,14 +2888,43 @@ function buildLayerUI() {
     }
   });
 
-  // Toggle expand + remove
+  // Toggle expand / remove / material type / finish
   stack.addEventListener('click', e => {
+    // Material type buttons
+    const matBtn = e.target.closest('[data-layer-mat]');
+    if (matBtn && matBtn.dataset.matKey) {
+      e.stopPropagation();
+      const i = parseInt(matBtn.dataset.layerMat);
+      state.layers[i].material = matBtn.dataset.matKey;
+      // Update active state within the group
+      matBtn.closest('div').querySelectorAll('.mat-type-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.matKey === matBtn.dataset.matKey)
+      );
+      buildTile(tileIsExploded);
+      updateFlatLay();
+      return;
+    }
+
+    // Finish toggle buttons
+    const finBtn = e.target.closest('[data-layer-finish]');
+    if (finBtn && finBtn.dataset.finishVal) {
+      e.stopPropagation();
+      const i = parseInt(finBtn.dataset.layerFinish);
+      state.layers[i].finish = finBtn.dataset.finishVal;
+      finBtn.closest('div').querySelectorAll('.mat-finish-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.finishVal === finBtn.dataset.finishVal)
+      );
+      buildTile(tileIsExploded);
+      updateFlatLay();
+      return;
+    }
+
     // Remove button
     const removeBtn = e.target.closest('[data-layer-remove]');
     if (removeBtn) {
       e.stopPropagation();
       const i = parseInt(removeBtn.dataset.layerRemove);
-      if (state.layers.length <= 2) return;
+      if (state.layers.length <= 1) return;
       if (i === 0 || i === state.layers.length - 1) return; // locked
       state.layers.splice(i, 1);
       validateThicknesses();
@@ -3006,17 +2944,6 @@ function buildLayerUI() {
       if (chevron) chevron.textContent = state.layers[i].expanded ? '▾' : '▸';
       toggle.setAttribute('aria-expanded', state.layers[i].expanded);
     }
-
-    // Visibility toggle (middle layers only)
-    const visBtn = e.target.closest('[data-layer-vis]');
-    if (visBtn) {
-      e.stopPropagation();
-      const i = parseInt(visBtn.dataset.layerVis);
-      state.layers[i].visible = !state.layers[i].visible;
-      visBtn.textContent = state.layers[i].visible ? '◉' : '○';
-      buildTile(tileIsExploded);
-      updateFlatLay();
-    }
   });
 }
 
@@ -3034,7 +2961,7 @@ function updateFlatLay() {
 // ─────────────────────────────────────────────────────────────
 function syncUIFromState() {
   // Dimensions
-  const fields = { 'dim-width': 'width', 'dim-height': 'height', 'dim-depth': 'depth', 'dim-radius': 'cornerRadius', 'dim-edge-radius': 'edgeRadius', 'dim-corner-segs': 'cornerSegments' };
+  const fields = { 'dim-width': 'width', 'dim-height': 'height', 'dim-depth': 'depth', 'dim-bevel-radius': 'bevelRadius', 'dim-bevel-segs': 'bevelSegments' };
   Object.entries(fields).forEach(([id, key]) => {
     const el = document.getElementById(id);
     if (el) el.value = state.tile[key];
@@ -3104,8 +3031,8 @@ function initUI() {
   // Dimension inputs
   const dimInputs = [
     ['dim-width', 'width'], ['dim-height', 'height'],
-    ['dim-depth', 'depth'], ['dim-radius', 'cornerRadius'],
-    ['dim-edge-radius', 'edgeRadius'], ['dim-corner-segs', 'cornerSegments'],
+    ['dim-depth', 'depth'], ['dim-bevel-radius', 'bevelRadius'],
+    ['dim-bevel-segs', 'bevelSegments'],
   ];
   dimInputs.forEach(([id, key]) => {
     const inp = document.getElementById(id);
