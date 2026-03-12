@@ -2084,35 +2084,44 @@ const designSys = {
   },
 
   updateThumb() {
-    // Update the thumbnail for whichever face is currently shown on the canvas
-    const tc = this.thumbCanvas;
-    const tctx = this.thumbCtx;
-    tctx.clearRect(0, 0, tc.width, tc.height);
-    tctx.drawImage(this.canvas, 0, 0, tc.width, tc.height);
+    // Re-entry guard: the cross-face render below calls draw() to repaint
+    // the canvas, and draw() calls updateThumb() — without this guard that
+    // triggers another cross-face render, causing infinite recursion.
+    if (this._updatingThumb) return;
+    this._updatingThumb = true;
+    try {
+      // Update the thumbnail for whichever face is currently shown on the canvas
+      const tc = this.thumbCanvas;
+      const tctx = this.thumbCtx;
+      tctx.clearRect(0, 0, tc.width, tc.height);
+      tctx.drawImage(this.canvas, 0, 0, tc.width, tc.height);
 
-    // Also update Face B thumbnail if it exists
-    const tcB = document.getElementById('design-thumb-B-canvas');
-    if (tcB && state.design.activeFace === 'A') {
-      // Render face B offscreen to update its thumb
-      const prevFace = state.design.activeFace;
-      state.design.activeFace = 'B';
-      const { width: W, height: H } = state.tile;
-      const S = this.scale;
-      const offCtx = this.canvas.getContext('2d');
-      offCtx.save();
-      // Draw face B content (reusing same canvas temporarily)
-      const restore = this.draw.bind(this);
-      restore(); // draw B
-      const tctxB = tcB.getContext('2d');
-      tctxB.clearRect(0, 0, tcB.width, tcB.height);
-      tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
-      offCtx.restore();
-      state.design.activeFace = prevFace;
-      this.draw(); // restore A
-    } else if (tcB && state.design.activeFace === 'B') {
-      const tctxB = tcB.getContext('2d');
-      tctxB.clearRect(0, 0, tcB.width, tcB.height);
-      tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
+      // Also update Face B thumbnail if it exists
+      const tcB = document.getElementById('design-thumb-B-canvas');
+      if (tcB && state.design.activeFace === 'A') {
+        // Render face B offscreen to update its thumb
+        const prevFace = state.design.activeFace;
+        state.design.activeFace = 'B';
+        const { width: W, height: H } = state.tile;
+        const S = this.scale;
+        const offCtx = this.canvas.getContext('2d');
+        offCtx.save();
+        // Draw face B content (reusing same canvas temporarily)
+        const restore = this.draw.bind(this);
+        restore(); // draw B
+        const tctxB = tcB.getContext('2d');
+        tctxB.clearRect(0, 0, tcB.width, tcB.height);
+        tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
+        offCtx.restore();
+        state.design.activeFace = prevFace;
+        this.draw(); // restore A
+      } else if (tcB && state.design.activeFace === 'B') {
+        const tctxB = tcB.getContext('2d');
+        tctxB.clearRect(0, 0, tcB.width, tcB.height);
+        tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
+      }
+    } finally {
+      this._updatingThumb = false;
     }
   },
 
