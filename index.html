@@ -1114,12 +1114,12 @@ input[type="checkbox"] {
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/"
+    "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
   }
 }
 </script>
-<script type="module">
+<script type="module" onerror="document.getElementById('loader-fill').style.background='#c0392b';document.querySelector('#loading h1').textContent='Load failed — check console';">
 // ═══════════════════════════════════════════════════════════════
 // OTTO TILE STUDIO — Main Application Module
 // Three.js r158 ESM build via importmap
@@ -3355,62 +3355,75 @@ async function init() {
   const fill = document.getElementById('loader-fill');
   const progress = (pct) => { if (fill) fill.style.width = pct + '%'; };
 
-  progress(10);
+  try {
+    progress(10);
 
-  // Setup renderer size
-  onResize();
-  window.addEventListener('resize', onResize);
+    // Setup renderer size
+    onResize();
+    window.addEventListener('resize', onResize);
 
-  progress(20);
+    progress(20);
 
-  // Setup environment
-  setupEnvironment();
+    // Setup environment
+    setupEnvironment();
 
-  progress(40);
+    progress(40);
 
-  // Build initial tile
-  buildLayerUI();
-  buildTile();
+    // Build initial tile
+    buildLayerUI();
+    buildTile();
 
-  progress(60);
+    progress(60);
 
-  // Setup face design canvas
-  designSys.init();
+    // Setup face design canvas
+    designSys.init();
 
-  progress(70);
+    progress(70);
 
-  // Apply initial lighting
-  updateLights();
+    // Apply initial lighting
+    updateLights();
 
-  progress(80);
+    progress(80);
 
-  // Set initial camera
-  setCameraPreset('iso');
+    // Set initial camera
+    setCameraPreset('iso');
 
-  progress(90);
+    progress(90);
 
-  // Init UI bindings
-  initUI();
+    // Init UI bindings
+    initUI();
 
-  progress(95);
+    progress(95);
 
-  // Render presets
-  presetSys.render();
-  updateScaleRef();
-  updateStackDiagram();
+    // Render presets
+    presetSys.render();
+    updateScaleRef();
+    updateStackDiagram();
 
-  progress(100);
+    progress(100);
 
-  // Hide loading screen
-  await new Promise(r => setTimeout(r, 400));
-  if (loader) {
-    loader.style.transition = 'opacity 0.5s';
-    loader.style.opacity = '0';
-    setTimeout(() => loader.style.display = 'none', 500);
+    // Hide loading screen
+    await new Promise(r => setTimeout(r, 400));
+    if (loader) {
+      loader.style.transition = 'opacity 0.5s';
+      loader.style.opacity = '0';
+      setTimeout(() => loader.style.display = 'none', 500);
+    }
+
+    // Start animation
+    animate();
+
+  } catch (err) {
+    // Display error directly on the loading screen so failures are never silent
+    console.error('Otto Tile Studio init error:', err);
+    if (fill) { fill.style.width = '100%'; fill.style.background = '#c0392b'; }
+    const h1 = loader && loader.querySelector('h1');
+    if (h1) h1.textContent = 'Error — see below';
+    const msg = document.createElement('pre');
+    msg.style.cssText = 'color:#e07070;font-size:0.75rem;max-width:480px;white-space:pre-wrap;text-align:left;margin-top:16px;padding:12px;background:rgba(192,57,43,0.15);border:1px solid rgba(192,57,43,0.4);border-radius:4px;';
+    msg.textContent = err && err.stack ? err.stack : String(err);
+    if (loader) loader.appendChild(msg);
   }
-
-  // Start animation
-  animate();
 }
 
 // ─────────────────────────────────────────────────────────────
