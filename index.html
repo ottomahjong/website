@@ -900,6 +900,16 @@ input[type="checkbox"] {
           <input type="number" id="dim-radius" value="4" min="0" max="15" step="0.5" aria-label="Corner radius in mm">
           <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
         </div>
+        <div class="field-row">
+          <label for="dim-edge-radius">Edge r.</label>
+          <input type="number" id="dim-edge-radius" value="1.5" min="0" max="6" step="0.25" aria-label="Edge radius in mm">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+        </div>
+        <div class="field-row">
+          <label for="dim-corner-segs">Segments</label>
+          <input type="number" id="dim-corner-segs" value="8" min="2" max="24" step="1" aria-label="Curve segments">
+          <span style="font-size:0.75rem;color:var(--text-secondary);"></span>
+        </div>
         <!-- Scale reference -->
         <div id="scale-ref">
           <div id="scale-rect"></div>
@@ -1148,7 +1158,7 @@ import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 // ─────────────────────────────────────────────────────────────
 const state = {
   // Physical dimensions (millimeters)
-  tile: { width: 36, height: 47, depth: 22, cornerRadius: 4 },
+  tile: { width: 36, height: 47, depth: 22, cornerRadius: 4, edgeRadius: 1.5, cornerSegments: 8 },
 
   // Four layers: Base, Body, Inlay, Cap (bottom to top)
   // Thicknesses must sum to tile.depth
@@ -1423,19 +1433,16 @@ const UNIT = 1;        // 1 unit = 1 mm in scene space
 // Creates a THREE.Shape for use with ExtrudeGeometry.
 // W, H, R are in scene units (mm × UNIT).
 // ─────────────────────────────────────────────────────────────
-function makeRoundedRectShape(W, H, R) {
-  const r = Math.min(R, W / 2 - 0.1, H / 2 - 0.1);
-  const s = new THREE.Shape();
-  s.moveTo(-W / 2 + r, -H / 2);
-  s.lineTo( W / 2 - r, -H / 2);
-  s.quadraticCurveTo( W / 2, -H / 2,  W / 2, -H / 2 + r);
-  s.lineTo( W / 2,  H / 2 - r);
-  s.quadraticCurveTo( W / 2,  H / 2,  W / 2 - r,  H / 2);
-  s.lineTo(-W / 2 + r,  H / 2);
-  s.quadraticCurveTo(-W / 2,  H / 2, -W / 2,  H / 2 - r);
-  s.lineTo(-W / 2, -H / 2 + r);
-  s.quadraticCurveTo(-W / 2, -H / 2, -W / 2 + r, -H / 2);
-  return s;
+// segs controls the arc smoothness (passed to ExtrudeGeometry as curveSegments).
+// Uses absarc so the segment count is controllable.
+function makeRoundedRectShape(W, H, R, segs) {
+  const r = Math.min(R, W / 2 - 0.01, H / 2 - 0.01);
+  const shape = new THREE.Shape();
+  shape.absarc( W/2 - r,  H/2 - r, r, 0,           Math.PI / 2,     false);
+  shape.absarc(-W/2 + r,  H/2 - r, r, Math.PI / 2, Math.PI,         false);
+  shape.absarc(-W/2 + r, -H/2 + r, r, Math.PI,     3 * Math.PI / 2, false);
+  shape.absarc( W/2 - r, -H/2 + r, r, 3 * Math.PI / 2, 2 * Math.PI, false);
+  return shape;
 }
 
 // (old makeTileLayerGeometry replaced by makeRoundedRectShape + ExtrudeGeometry in buildTile)
@@ -1460,7 +1467,8 @@ function buildTile(exploded = false) {
   });
   tileMeshes = [];
 
-  const { width: W, height: H, depth: D, cornerRadius: R } = state.tile;
+  const { width: W, height: H, depth: D, cornerRadius: R,
+          edgeRadius: ER, cornerSegments: segs } = state.tile;
 
   // Validate and auto-adjust layer thicknesses
   validateThicknesses();
@@ -1476,19 +1484,45 @@ function buildTile(exploded = false) {
 
   visibleLayers.forEach(({ layer, i }, visibleIdx) => {
     const t = layer.thickness;
+    const isFirst = (visibleIdx === 0);
     const isLast  = (visibleIdx === totalVisible - 1);
 
-    // ExtrudeGeometry along Z, then rotate -90° X so it lies flat (Z→Y).
-    // No bevel — rounded corners come entirely from the 2D shape profile.
-    // All layers use the same W/H/R so sides are perfectly flush.
-    const shape = makeRoundedRectShape(W * UNIT, H * UNIT, R * UNIT);
-    const geo = new THREE.ExtrudeGeometry(shape, {
-      depth:        t * UNIT,
-      bevelEnabled: false,
-    });
-    // Rotate so extrusion axis (Z) aligns with scene Y (vertical).
-    geo.rotateX(-Math.PI / 2);
-    // Center geometry vertically around y=0 so mesh.position.y = layer center.
+    // All layers use the same rounded-rect profile so vertical walls are perfectly flush.
+    // Cap (topmost) and Base (bottommost) get an edge bevel on their outward face only.
+    // Middle layers: straight extrusion, no bevel.
+    const shape = makeRoundedRectShape(W * UNIT, H * UNIT, R * UNIT, segs);
+    let geo;
+
+    if ((isFirst || isLast) && ER > 0) {
+      // Extrude with bevel on both ends, then orient so the bevel appears only
+      // on the externally-visible face (top for Cap, bottom for Base).
+      geo = new THREE.ExtrudeGeometry(shape, {
+        depth:          t * UNIT,
+        bevelEnabled:   true,
+        bevelThickness: ER * UNIT,
+        bevelSize:      ER * UNIT,
+        bevelSegments:  segs,
+        bevelOffset:    0,
+        curveSegments:  segs,
+      });
+      geo.rotateX(-Math.PI / 2);
+      // After rotation: z=0 face (bevel) → y=0 (bottom), z=t face (bevel) → y=t (top).
+      if (isLast) {
+        // Cap: flip so the z=0 bevel face ends up at the TOP (visible lip).
+        // scale(1,-1,1) maps y→-y, then translate(0,t,0) shifts back into [0,t].
+        geo.scale(1, -1, 1);
+        geo.translate(0, t * UNIT, 0);
+      }
+      // Base: no flip — z=0 bevel face is already at y=0 (the visible bottom lip).
+    } else {
+      geo = new THREE.ExtrudeGeometry(shape, {
+        depth:         t * UNIT,
+        bevelEnabled:  false,
+        curveSegments: segs,
+      });
+      geo.rotateX(-Math.PI / 2);
+    }
+    // Center geometry vertically around y=0 so mesh.position.y = layer centre.
     geo.translate(0, -t * UNIT / 2, 0);
 
     // Cap (topmost visible) gets its opacity applied; all others are fully opaque.
@@ -2341,7 +2375,7 @@ const flatLaySys = {
     const rows = Math.ceil(count / cols);
 
     // Build geometry + InstancedMesh per layer using rounded shape (matches single-tile view)
-    const { cornerRadius: R } = state.tile;
+    const { cornerRadius: R, cornerSegments: segsFL } = state.tile;
     const totalVisFL = state.layers.filter((l, i) => !(i === 2 && !l.visible)).length;
 
     let yOffset = -D / 2;
@@ -2353,10 +2387,11 @@ const flatLaySys = {
       const isLastFL = (flVisIdx === totalVisFL - 1);
       flVisIdx++;
 
-      const tileShape = makeRoundedRectShape(W, H, R);
+      const tileShape = makeRoundedRectShape(W, H, R, segsFL);
       const geo = new THREE.ExtrudeGeometry(tileShape, {
-        depth:        t,
-        bevelEnabled: false,
+        depth:         t,
+        bevelEnabled:  false,
+        curveSegments: segsFL,
       });
       geo.rotateX(-Math.PI / 2);
       geo.translate(0, -t / 2, 0);
@@ -2720,7 +2755,7 @@ const presetSys = {
     name: 'Night Table',
     desc: 'Otto Mahjong original spec',
     config: {
-      tile: { width: 36, height: 47, depth: 22, cornerRadius: 4 },
+      tile: { width: 36, height: 47, depth: 22, cornerRadius: 4, edgeRadius: 1.5, cornerSegments: 8 },
       layers: [
         { name: 'Base',  thickness: 8,  material: 'resin-matte',   color: '#E8EEF2', visible: true, expanded: false },
         { name: 'Body',  thickness: 10, material: 'resin-gloss',   color: '#1A2137', visible: true, expanded: false },
@@ -2999,7 +3034,7 @@ function updateFlatLay() {
 // ─────────────────────────────────────────────────────────────
 function syncUIFromState() {
   // Dimensions
-  const fields = { 'dim-width': 'width', 'dim-height': 'height', 'dim-depth': 'depth', 'dim-radius': 'cornerRadius' };
+  const fields = { 'dim-width': 'width', 'dim-height': 'height', 'dim-depth': 'depth', 'dim-radius': 'cornerRadius', 'dim-edge-radius': 'edgeRadius', 'dim-corner-segs': 'cornerSegments' };
   Object.entries(fields).forEach(([id, key]) => {
     const el = document.getElementById(id);
     if (el) el.value = state.tile[key];
@@ -3070,6 +3105,7 @@ function initUI() {
   const dimInputs = [
     ['dim-width', 'width'], ['dim-height', 'height'],
     ['dim-depth', 'depth'], ['dim-radius', 'cornerRadius'],
+    ['dim-edge-radius', 'edgeRadius'], ['dim-corner-segs', 'cornerSegments'],
   ];
   dimInputs.forEach(([id, key]) => {
     const inp = document.getElementById(id);
