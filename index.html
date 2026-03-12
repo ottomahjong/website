@@ -853,14 +853,11 @@ input[type="checkbox"] {
     <div id="design-modal-body">
       <!-- Tool palette -->
       <div id="design-tools">
-        <button class="tool-btn active" data-tool="select" data-tip="Select" title="Select tool" aria-label="Select tool">⊹</button>
-        <button class="tool-btn" data-tool="text" data-tip="Text" title="Text tool" aria-label="Text tool">T</button>
-        <button class="tool-btn" data-tool="rect" data-tip="Rectangle" title="Rectangle tool" aria-label="Rectangle tool">▭</button>
-        <button class="tool-btn" data-tool="circle" data-tip="Circle" title="Circle tool" aria-label="Circle tool">◯</button>
-        <button class="tool-btn" data-tool="star" data-tip="Star" title="Star tool" aria-label="Star tool">★</button>
-        <button class="tool-btn" data-tool="polygon" data-tip="Polygon" title="Polygon tool" aria-label="Polygon tool">⬡</button>
+        <button class="tool-btn active" data-tool="select" data-tip="Select / Move" title="Select" aria-label="Select tool">⊹</button>
         <div style="width:100%;height:1px;background:var(--border);margin:4px 0;"></div>
-        <button class="tool-btn" data-tool="svg" data-tip="Upload SVG" title="Upload SVG" aria-label="Upload SVG" id="svg-upload-btn">⬆</button>
+        <button class="tool-btn" id="png-upload-btn" data-tip="Upload PNG" title="Upload PNG image" aria-label="Upload PNG">🖼</button>
+        <button class="tool-btn" id="svg-upload-btn" data-tip="Upload SVG" title="Upload SVG" aria-label="Upload SVG">⬆</button>
+        <input type="file" id="png-file-input" accept=".png,.jpg,.jpeg,.webp" style="display:none;" aria-label="PNG file input">
         <input type="file" id="svg-file-input" accept=".svg" style="display:none;" aria-label="SVG file input">
       </div>
       <!-- Canvas -->
@@ -869,9 +866,9 @@ input[type="checkbox"] {
       </div>
       <!-- Properties -->
       <div id="design-props">
-        <h4>Properties</h4>
+        <h4>Image</h4>
         <div id="element-props-area">
-          <p style="font-size:0.75rem;color:var(--text-secondary);">Select or draw an element</p>
+          <p style="font-size:0.75rem;color:var(--text-secondary);">Upload a PNG or SVG to place on the face</p>
         </div>
         <h4 style="margin-top:12px;">Elements</h4>
         <div id="element-list"></div>
@@ -1042,6 +1039,10 @@ input[type="checkbox"] {
       </div>
 
       <button class="btn btn-sm btn-ghost" id="reset-view-btn" aria-label="Reset camera view">↺ Reset</button>
+      <div class="toolbar-divider"></div>
+      <button class="btn btn-sm btn-ghost" id="refresh-render-btn"
+              data-tip="Force rebuild tile render" title="Refresh render"
+              aria-label="Refresh render">⟳ Refresh</button>
 
       <div class="toolbar-divider"></div>
 
@@ -1696,14 +1697,13 @@ const designSys = {
   ctx: null,
   thumbCanvas: null,
   thumbCtx: null,
-  scale: 10,        // pixels per mm in the design canvas
+  scale: 10,
   dragging: false,
   dragStart: null,
-  currentEl: null,
+  dragEl: null,
   nextId: 1,
+  _updatingThumb: false,
 
-  // Active face accessors — always read/write through these helpers.
-  // To add a third face: add faceC to state.design and extend these.
   get activeFaceData() { return state.design['face' + state.design.activeFace]; },
   get elements()       { return this.activeFaceData.elements; },
   set elements(v)      { this.activeFaceData.elements = v; },
@@ -1724,10 +1724,72 @@ const designSys = {
     this.canvas.addEventListener('mousemove', e => this.onMousemove(e));
     this.canvas.addEventListener('mouseup',   e => this.onMouseup(e));
 
+    // Wire PNG upload button
+    document.getElementById('png-upload-btn')?.addEventListener('click', () => {
+      document.getElementById('png-file-input')?.click();
+    });
+    document.getElementById('png-file-input')?.addEventListener('change', e => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => this.loadImageSrc(ev.target.result, 'png');
+      reader.readAsDataURL(file);
+      e.target.value = '';
+    });
+
+    // Wire SVG upload button
+    document.getElementById('svg-upload-btn')?.addEventListener('click', () => {
+      document.getElementById('svg-file-input')?.click();
+    });
+    document.getElementById('svg-file-input')?.addEventListener('change', e => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const blob = new Blob([ev.target.result], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        this.loadImageSrc(url, 'svg', () => URL.revokeObjectURL(url));
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+    });
+
     this.draw();
   },
 
-  // Convert canvas pixel coords to mm coords
+  // Load an image src (data URL or object URL) and add it as an element
+  loadImageSrc(src, type, onDone) {
+    const img = new Image();
+    img.onload = () => {
+      const { width: W, height: H } = state.tile;
+      const scaleF = Math.min((W * 0.8) / img.width, (H * 0.8) / img.height);
+      const elW = img.width * scaleF;
+      const elH = img.height * scaleF;
+      const el = {
+        id: this.nextId++,
+        type: 'image',
+        src,
+        imgEl: img,
+        x: (W - elW) / 2,
+        y: (H - elH) / 2,
+        w: elW,
+        h: elH,
+        fillColor: '#AF6B4F',
+        fillOpacity: 0,
+        depth: state.engravingDepth,
+        locked: false,
+      };
+      this.elements.push(el);
+      this.selectedId = el.id;
+      this.updatePropsPanel();
+      this.draw();
+      this.applyToTile();
+      if (onDone) onDone();
+    };
+    img.onerror = () => { console.error('Failed to load image'); };
+    img.src = src;
+  },
+
   pxToMm(x, y) {
     const rect = this.canvas.getBoundingClientRect();
     const scaleX = this.canvas.width  / rect.width;
@@ -1740,110 +1802,54 @@ const designSys = {
 
   onMousedown(e) {
     const mm = this.pxToMm(e.clientX, e.clientY);
-    const tool = state.design.tool;
     this.dragging = true;
     this.dragStart = mm;
-
-    if (tool === 'select') {
-      // Hit-test elements (last = topmost)
-      let hit = null;
-      for (let i = this.elements.length - 1; i >= 0; i--) {
-        const el = this.elements[i];
-        if (mm.x >= el.x && mm.x <= el.x + el.w &&
-            mm.y >= el.y && mm.y <= el.y + el.h) {
-          hit = el; break;
-        }
+    // Hit test elements (last = topmost)
+    let hit = null;
+    for (let i = this.elements.length - 1; i >= 0; i--) {
+      const el = this.elements[i];
+      if (mm.x >= el.x && mm.x <= el.x + el.w &&
+          mm.y >= el.y && mm.y <= el.y + el.h) {
+        hit = el; break;
       }
-      this.selectedId = hit ? hit.id : null;
-      this.updatePropsPanel();
-      this.draw();
-      return;
     }
-
-    if (tool === 'text') {
-      const txt = prompt('Enter text:', 'OTTO');
-      if (txt) {
-        const el = {
-          id: this.nextId++,
-          type: 'text',
-          x: mm.x - 5, y: mm.y - 3,
-          w: txt.length * 3, h: 6,
-          text: txt,
-          fontSize: 8,
-          fontFamily: 'Jost',
-          mode: 'engraved-painted',
-          depth: state.engravingDepth,
-          fillColor: '#AF6B4F',
-          fillMaterial: 'metallic',
-        };
-        this.elements.push(el);
-        this.selectedId = el.id;
-        this.updatePropsPanel();
-        this.draw();
-        this.applyToTile();
-      }
-      this.dragging = false;
-      return;
-    }
-
-    // Shape tools: start a new element
-    this.currentEl = {
-      id: this.nextId++,
-      type: tool,
-      x: mm.x, y: mm.y, w: 0, h: 0,
-      mode: 'engraved-painted',
-      depth: state.engravingDepth,
-      fillColor: '#AF6B4F',
-      fillMaterial: 'metallic',
-    };
+    this.dragEl = hit || null;
+    this.selectedId = hit ? hit.id : null;
+    if (hit) this._dragOffset = { x: mm.x - hit.x, y: mm.y - hit.y };
+    this.updatePropsPanel();
+    this.draw();
   },
 
   onMousemove(e) {
-    if (!this.dragging || !this.currentEl) return;
+    if (!this.dragging || !this.dragEl) return;
     const mm = this.pxToMm(e.clientX, e.clientY);
-    this.currentEl.w = mm.x - this.dragStart.x;
-    this.currentEl.h = mm.y - this.dragStart.y;
-    this.draw(this.currentEl); // preview
+    this.dragEl.x = mm.x - this._dragOffset.x;
+    this.dragEl.y = mm.y - this._dragOffset.y;
+    this.draw();
   },
 
   onMouseup(e) {
     if (!this.dragging) return;
     this.dragging = false;
-    if (this.currentEl && (Math.abs(this.currentEl.w) > 1 || Math.abs(this.currentEl.h) > 1)) {
-      // Normalize negative dimensions
-      if (this.currentEl.w < 0) {
-        this.currentEl.x += this.currentEl.w;
-        this.currentEl.w = -this.currentEl.w;
-      }
-      if (this.currentEl.h < 0) {
-        this.currentEl.y += this.currentEl.h;
-        this.currentEl.h = -this.currentEl.h;
-      }
-      this.elements.push(this.currentEl);
-      this.selectedId = this.currentEl.id;
-      this.updatePropsPanel();
-    }
-    this.currentEl = null;
-    this.draw();
-    this.applyToTile();
+    if (this.dragEl) this.applyToTile();
+    this.dragEl = null;
   },
 
-  // Draw all design elements on the canvas
-  draw(previewEl = null) {
+  draw() {
     const { width: W, height: H } = state.tile;
     const S = this.scale;
     const ctx = this.ctx;
 
     ctx.clearRect(0, 0, W * S, H * S);
 
-    // Background color: cap color for face A, base color for face B
+    // Face background
     const faceColor = state.design.activeFace === 'A'
       ? state.layers[state.layers.length - 1].color
       : state.layers[0].color;
     ctx.fillStyle = faceColor;
     ctx.fillRect(0, 0, W * S, H * S);
 
-    // Grid (light guide)
+    // Grid guide
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 0.5;
     for (let x = 0; x <= W; x += 5) {
@@ -1853,12 +1859,23 @@ const designSys = {
       ctx.beginPath(); ctx.moveTo(0, y * S); ctx.lineTo(W * S, y * S); ctx.stroke();
     }
 
-    // Draw each element
-    [...this.elements, ...(previewEl ? [previewEl] : [])].forEach(el => {
-      this.drawElement(ctx, el, S);
+    // Draw image elements
+    this.elements.forEach(el => {
+      if (!el.imgEl) return;
+      ctx.save();
+      ctx.drawImage(el.imgEl, el.x * S, el.y * S, el.w * S, el.h * S);
+      if (el.fillOpacity > 0) {
+        ctx.globalAlpha = el.fillOpacity;
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.fillStyle = el.fillColor || '#AF6B4F';
+        ctx.fillRect(el.x * S, el.y * S, el.w * S, el.h * S);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
     });
 
-    // Selection outline
+    // Selection outline + handles
     const selEl = this.elements.find(e => e.id === this.selectedId);
     if (selEl) {
       ctx.strokeStyle = 'rgba(175,107,79,0.9)';
@@ -1866,164 +1883,40 @@ const designSys = {
       ctx.setLineDash([3, 3]);
       ctx.strokeRect(selEl.x * S - 2, selEl.y * S - 2, selEl.w * S + 4, selEl.h * S + 4);
       ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(175,107,79,0.9)';
+      [[selEl.x * S - 4, selEl.y * S - 4],
+       [(selEl.x + selEl.w) * S, selEl.y * S - 4],
+       [selEl.x * S - 4, (selEl.y + selEl.h) * S],
+       [(selEl.x + selEl.w) * S, (selEl.y + selEl.h) * S]
+      ].forEach(([hx, hy]) => ctx.fillRect(hx, hy, 8, 8));
     }
 
-    // Update thumbnail and element list
     this.updateThumb();
     this.updateElementList();
   },
 
-  drawElement(ctx, el, S) {
-    const engraveShadow = el.mode === 'blind';
-    const fillColor = el.fillColor || '#AF6B4F';
-    const isRaised = el.mode === 'raised';
-
-    ctx.save();
-
-    if (el.type === 'text') {
-      const fs = (el.fontSize || 8) * S * 0.12;
-      ctx.font = `${fs}px '${el.fontFamily || 'Jost'}', sans-serif`;
-      ctx.textBaseline = 'middle';
-      if (engraveShadow) {
-        ctx.fillStyle = 'rgba(0,0,0,0.4)';
-        ctx.fillText(el.text, el.x * S + 1, (el.y + el.h / 2) * S + 1);
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillText(el.text, el.x * S, (el.y + el.h / 2) * S);
-      } else {
-        if (isRaised) {
-          // Drop shadow to show proud-of-surface
-          ctx.shadowColor = 'rgba(0,0,0,0.5)';
-          ctx.shadowBlur = 4 * S * 0.1;
-          ctx.shadowOffsetY = -2 * S * 0.1;
-        }
-        ctx.fillStyle = fillColor;
-        ctx.fillText(el.text, el.x * S, (el.y + el.h / 2) * S);
-      }
-    } else if (el.type === 'rect') {
-      if (engraveShadow) {
-        // Inner shadow effect
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(el.x * S + 1, el.y * S + 1, el.w * S - 2, el.h * S - 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.3)';
-        ctx.fillRect(el.x * S, el.y * S, el.w * S, el.h * S);
-      } else {
-        if (isRaised) { ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6; ctx.shadowOffsetY = -3; }
-        ctx.fillStyle = fillColor;
-        ctx.fillRect(el.x * S, el.y * S, el.w * S, el.h * S);
-      }
-      // Edge highlight (simulates engraving edge catching light)
-      if (!engraveShadow) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(el.x * S, el.y * S, el.w * S, el.h * S);
-      }
-    } else if (el.type === 'circle') {
-      const cx = (el.x + el.w / 2) * S;
-      const cy = (el.y + el.h / 2) * S;
-      const rx = Math.abs(el.w / 2) * S;
-      const ry = Math.abs(el.h / 2) * S;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      if (engraveShadow) {
-        ctx.fillStyle = 'rgba(0,0,0,0.45)';
-        ctx.fill();
-      } else {
-        if (isRaised) { ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6; }
-        ctx.fillStyle = fillColor;
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-      }
-    } else if (el.type === 'star') {
-      this.drawStar(ctx, el, S, fillColor, engraveShadow, isRaised);
-    } else if (el.type === 'polygon') {
-      this.drawPolygon(ctx, el, S, fillColor, engraveShadow, isRaised);
-    }
-
-    ctx.restore();
-  },
-
-  drawStar(ctx, el, S, color, engraved, raised) {
-    const cx = (el.x + el.w / 2) * S;
-    const cy = (el.y + el.h / 2) * S;
-    const outerR = Math.min(Math.abs(el.w), Math.abs(el.h)) / 2 * S;
-    const innerR = outerR * 0.4;
-    const points = 5;
-    ctx.beginPath();
-    for (let i = 0; i < points * 2; i++) {
-      const angle = (i * Math.PI / points) - Math.PI / 2;
-      const r = i % 2 === 0 ? outerR : innerR;
-      const x = cx + Math.cos(angle) * r;
-      const y = cy + Math.sin(angle) * r;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    if (engraved) { ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill(); }
-    else {
-      if (raised) { ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6; }
-      ctx.fillStyle = color; ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 0.5; ctx.stroke();
-    }
-  },
-
-  drawPolygon(ctx, el, S, color, engraved, raised) {
-    const cx = (el.x + el.w / 2) * S;
-    const cy = (el.y + el.h / 2) * S;
-    const r = Math.min(Math.abs(el.w), Math.abs(el.h)) / 2 * S;
-    const sides = 6;
-    ctx.beginPath();
-    for (let i = 0; i < sides; i++) {
-      const angle = (i * Math.PI * 2 / sides) - Math.PI / 2;
-      const x = cx + Math.cos(angle) * r;
-      const y = cy + Math.sin(angle) * r;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    if (engraved) { ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill(); }
-    else {
-      if (raised) { ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6; }
-      ctx.fillStyle = color; ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 0.5; ctx.stroke();
-    }
-  },
-
   updateThumb() {
-    // Re-entry guard: the cross-face render below calls draw() to repaint
-    // the canvas, and draw() calls updateThumb() — without this guard that
-    // triggers another cross-face render, causing infinite recursion.
     if (this._updatingThumb) return;
     this._updatingThumb = true;
     try {
-      // Update the thumbnail for whichever face is currently shown on the canvas
       const tc = this.thumbCanvas;
       const tctx = this.thumbCtx;
       tctx.clearRect(0, 0, tc.width, tc.height);
       tctx.drawImage(this.canvas, 0, 0, tc.width, tc.height);
 
-      // Also update Face B thumbnail if it exists
       const tcB = document.getElementById('design-thumb-B-canvas');
-      if (tcB && state.design.activeFace === 'A') {
-        // Render face B offscreen to update its thumb
+      if (tcB) {
         const prevFace = state.design.activeFace;
-        state.design.activeFace = 'B';
-        const { width: W, height: H } = state.tile;
-        const S = this.scale;
-        const offCtx = this.canvas.getContext('2d');
-        offCtx.save();
-        // Draw face B content (reusing same canvas temporarily)
-        const restore = this.draw.bind(this);
-        restore(); // draw B
-        const tctxB = tcB.getContext('2d');
-        tctxB.clearRect(0, 0, tcB.width, tcB.height);
-        tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
-        offCtx.restore();
+        const otherFace = prevFace === 'A' ? 'B' : 'A';
+        state.design.activeFace = otherFace;
+        this.draw();
+        const otherCtx = (otherFace === 'A' ? this.thumbCtx : tcB.getContext('2d'));
+        const sameCtx  = (otherFace === 'A' ? tcB.getContext('2d') : this.thumbCtx);
+        const target = (prevFace === 'A') ? tcB.getContext('2d') : this.thumbCtx;
+        target.clearRect(0, 0, tcB.width, tcB.height);
+        target.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
         state.design.activeFace = prevFace;
-        this.draw(); // restore A
-      } else if (tcB && state.design.activeFace === 'B') {
-        const tctxB = tcB.getContext('2d');
-        tctxB.clearRect(0, 0, tcB.width, tcB.height);
-        tctxB.drawImage(this.canvas, 0, 0, tcB.width, tcB.height);
+        this.draw();
       }
     } finally {
       this._updatingThumb = false;
@@ -2034,12 +1927,10 @@ const designSys = {
     const list = document.getElementById('element-list');
     if (!list) return;
     list.innerHTML = '';
-    this.elements.forEach(el => {
+    this.elements.forEach((el, idx) => {
       const div = document.createElement('div');
       div.className = 'element-item' + (el.id === this.selectedId ? ' selected' : '');
-      div.innerHTML = `<span>${el.type === 'text' ? '𝐓' : el.type === 'rect' ? '▭' : el.type === 'circle' ? '◯' : '★'}</span>
-        <span>${el.type === 'text' ? el.text : el.type.charAt(0).toUpperCase() + el.type.slice(1)}</span>
-        <span style="margin-left:auto;font-size:0.65rem;color:var(--text-secondary)">${el.mode}</span>`;
+      div.innerHTML = `<span>🖼</span><span>Image ${idx + 1}</span>`;
       div.addEventListener('click', () => {
         this.selectedId = el.id;
         this.updatePropsPanel();
@@ -2054,8 +1945,9 @@ const designSys = {
     const delBtn = document.getElementById('delete-element-btn');
     if (!area) return;
     const el = this.elements.find(e => e.id === this.selectedId);
+
     if (!el) {
-      area.innerHTML = '<p style="font-size:0.75rem;color:var(--text-secondary);">Select or draw an element</p>';
+      area.innerHTML = '<p style="font-size:0.75rem;color:var(--text-secondary);">Upload a PNG or SVG, then select it to adjust settings</p>';
       if (delBtn) delBtn.style.display = 'none';
       return;
     }
@@ -2063,82 +1955,89 @@ const designSys = {
 
     area.innerHTML = `
       <div class="prop-row">
-        <label for="prop-mode">Mode</label>
-        <select id="prop-mode">
-          <option value="blind" ${el.mode==='blind'?'selected':''}>Blind Engraved</option>
-          <option value="engraved-painted" ${el.mode==='engraved-painted'?'selected':''}>Engraved + Infill</option>
-          <option value="raised" ${el.mode==='raised'?'selected':''}>Raised</option>
-        </select>
+        <label for="prop-depth">Engrave depth</label>
+        <input type="number" id="prop-depth" value="${(el.depth || state.engravingDepth).toFixed(2)}"
+               min="0.1" max="2" step="0.05">
+        <span style="font-size:0.72rem;color:var(--text-secondary);">mm</span>
       </div>
       <div class="prop-row">
-        <label for="prop-depth">Depth (mm)</label>
-        <input type="number" id="prop-depth" value="${el.depth||0.5}" min="0.1" max="2" step="0.05">
-      </div>
-      <div class="prop-row" id="fill-color-row" style="${el.mode==='blind'?'display:none':''}">
-        <label for="prop-fill-color">Fill Color</label>
-        <input type="color" id="prop-fill-color" value="${el.fillColor||'#AF6B4F'}">
-      </div>
-      <div class="prop-row" id="fill-mat-row" style="${el.mode==='blind'?'display:none':''}">
-        <label for="prop-fill-mat">Fill Material</label>
-        <select id="prop-fill-mat">
-          <option value="matte" ${el.fillMaterial==='matte'?'selected':''}>Painted Matte</option>
-          <option value="gloss" ${el.fillMaterial==='gloss'?'selected':''}>Painted Gloss</option>
-          <option value="metallic" ${el.fillMaterial==='metallic'?'selected':''}>Metallic</option>
-          <option value="solid" ${el.fillMaterial==='solid'?'selected':''}>Solid Color</option>
-        </select>
-      </div>
-      ${el.type === 'text' ? `
-      <div class="prop-row">
-        <label for="prop-text">Text</label>
-        <input type="text" id="prop-text" value="${el.text||''}">
+        <label for="prop-fill-color">Fill color</label>
+        <input type="color" id="prop-fill-color" value="${el.fillColor || '#AF6B4F'}">
       </div>
       <div class="prop-row">
-        <label for="prop-fontsize">Size (mm)</label>
-        <input type="number" id="prop-fontsize" value="${el.fontSize||8}" min="2" max="40" step="1">
+        <label for="prop-fill-opacity">Fill opacity</label>
+        <input type="range" id="prop-fill-opacity" min="0" max="1" step="0.05"
+               value="${el.fillOpacity || 0}" style="flex:1;">
+        <span id="fill-opacity-val" style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-secondary);flex:0 0 32px;">${Math.round((el.fillOpacity || 0) * 100)}%</span>
       </div>
-      <div class="prop-row">
-        <label for="prop-font">Font</label>
-        <select id="prop-font">
-          <option value="Jost" ${el.fontFamily==='Jost'?'selected':''}>Jost (Futura)</option>
-          <option value="Cormorant Garamond" ${el.fontFamily==='Cormorant Garamond'?'selected':''}>Cormorant</option>
-          <option value="JetBrains Mono" ${el.fontFamily==='JetBrains Mono'?'selected':''}>Monospace</option>
-        </select>
-      </div>` : ''}
+      <div class="prop-row" style="gap:6px;flex-wrap:wrap;">
+        <label style="width:100%;font-size:0.75rem;color:var(--text-secondary);">Scale</label>
+        <button class="btn btn-sm" id="prop-scale-up" style="flex:1;">+ Larger</button>
+        <button class="btn btn-sm" id="prop-scale-down" style="flex:1;">− Smaller</button>
+      </div>
+      <div class="prop-row" style="gap:6px;flex-wrap:wrap;">
+        <label style="width:100%;font-size:0.75rem;color:var(--text-secondary);">Position</label>
+        <button class="btn btn-sm" id="prop-center-h" style="flex:1;" title="Center horizontally">⇔ H</button>
+        <button class="btn btn-sm" id="prop-center-v" style="flex:1;" title="Center vertically">⇕ V</button>
+      </div>
     `;
 
-    // Wire up prop changes
-    const wireChange = (id, key, parser = v => v) => {
+    const wireChange = (id, fn) => {
       const inp = document.getElementById(id);
-      if (inp) inp.addEventListener('input', () => {
-        el[key] = parser(inp.value);
-        this.draw(); this.applyToTile();
-        if (key === 'mode') {
-          const hideRows = inp.value === 'blind';
-          const cr = document.getElementById('fill-color-row');
-          const mr = document.getElementById('fill-mat-row');
-          if (cr) cr.style.display = hideRows ? 'none' : '';
-          if (mr) mr.style.display = hideRows ? 'none' : '';
-        }
-      });
+      if (inp) inp.addEventListener('input', fn);
     };
-    wireChange('prop-mode', 'mode');
-    wireChange('prop-depth', 'depth', parseFloat);
-    wireChange('prop-fill-color', 'fillColor');
-    wireChange('prop-fill-mat', 'fillMaterial');
-    wireChange('prop-text', 'text');
-    wireChange('prop-fontsize', 'fontSize', parseFloat);
-    wireChange('prop-font', 'fontFamily');
+
+    wireChange('prop-depth', () => {
+      el.depth = parseFloat(document.getElementById('prop-depth').value);
+      state.engravingDepth = el.depth;
+      const edVal = document.getElementById('engrave-depth-val');
+      const edInp = document.getElementById('engraving-depth');
+      if (edVal) edVal.textContent = el.depth.toFixed(2) + 'mm';
+      if (edInp) edInp.value = el.depth;
+      this.applyToTile();
+    });
+
+    wireChange('prop-fill-color', () => {
+      el.fillColor = document.getElementById('prop-fill-color').value;
+      this.draw(); this.applyToTile();
+    });
+
+    wireChange('prop-fill-opacity', () => {
+      const val = parseFloat(document.getElementById('prop-fill-opacity').value);
+      el.fillOpacity = val;
+      const span = document.getElementById('fill-opacity-val');
+      if (span) span.textContent = Math.round(val * 100) + '%';
+      this.draw(); this.applyToTile();
+    });
+
+    const { width: W, height: H } = state.tile;
+
+    document.getElementById('prop-scale-up')?.addEventListener('click', () => {
+      const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
+      el.w *= 1.1; el.h *= 1.1;
+      el.x = cx - el.w / 2; el.y = cy - el.h / 2;
+      this.draw(); this.applyToTile();
+    });
+    document.getElementById('prop-scale-down')?.addEventListener('click', () => {
+      const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
+      el.w *= 0.9; el.h *= 0.9;
+      el.x = cx - el.w / 2; el.y = cy - el.h / 2;
+      this.draw(); this.applyToTile();
+    });
+    document.getElementById('prop-center-h')?.addEventListener('click', () => {
+      el.x = (W - el.w) / 2;
+      this.draw(); this.applyToTile();
+    });
+    document.getElementById('prop-center-v')?.addEventListener('click', () => {
+      el.y = (H - el.h) / 2;
+      this.draw(); this.applyToTile();
+    });
   },
 
-  // Generate a normal map canvas from the design canvas (heightmap)
-  // Uses Sobel operator to compute surface gradients.
-  // normalStrength: higher = more pronounced engraving effect
   generateNormalMap(normalStrength = 4.0) {
     const src = this.canvas;
     const W = src.width, H = src.height;
-    const sCtx = src.getContext('2d');
-    const imgData = sCtx.getImageData(0, 0, W, H).data;
-
+    const imgData = src.getContext('2d').getImageData(0, 0, W, H).data;
     const out = document.createElement('canvas');
     out.width = W; out.height = H;
     const oCtx = out.getContext('2d');
@@ -2147,15 +2046,12 @@ const designSys = {
     const getH = (x, y) => {
       const px = Math.max(0, Math.min(W-1, x));
       const py = Math.max(0, Math.min(H-1, y));
-      // Use average luminance as height; invert for engrave
       const idx = (py * W + px) * 4;
-      const r = imgData[idx], g = imgData[idx+1], b = imgData[idx+2];
-      return (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+      return (imgData[idx] * 0.299 + imgData[idx+1] * 0.587 + imgData[idx+2] * 0.114) / 255;
     };
 
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        // Sobel
         const dX = (getH(x+1,y-1) + 2*getH(x+1,y) + getH(x+1,y+1)) -
                    (getH(x-1,y-1) + 2*getH(x-1,y) + getH(x-1,y+1));
         const dY = (getH(x-1,y+1) + 2*getH(x,y+1) + getH(x+1,y+1)) -
@@ -2175,33 +2071,32 @@ const designSys = {
     return out;
   },
 
-  // Apply the current active-face design canvas as a texture + normal map
-  // to the corresponding mesh (Cap for face A, Base for face B).
-  // Called after every draw change, and from applyDesignTexture().
-  // To add a third face: extend this method and add a faceC mesh lookup.
   applyToTile() {
     this.applyFaceTexture('A');
     this.applyFaceTexture('B');
   },
 
   applyFaceTexture(face) {
-    // Temporarily switch to the requested face to render its canvas
     const prev = state.design.activeFace;
     state.design.activeFace = face;
-    this.draw(); // render that face's elements to this.canvas
+    this.draw();
 
     const isFaceA = face === 'A';
-    // Clipping-plane arch: one mesh per layer. Face A → last mesh (cap/top), Face B → first mesh (base)
-    const targetMesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
-    const mat = targetMesh?.material ?? null;
+    const mesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
 
-    if (mat) {
+    if (mesh && mesh.material) {
+      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+
+      if (mat.map) mat.map.dispose();
+      if (mat.normalMap) mat.normalMap.dispose();
+
       const colorTex = new THREE.CanvasTexture(this.canvas);
       colorTex.colorSpace = THREE.SRGBColorSpace;
       colorTex.needsUpdate = true;
       mat.map = colorTex;
 
-      const normalCanvas = this.generateNormalMap(3.0);
+      const normalStrength = state.engravingDepth * 8;
+      const normalCanvas = this.generateNormalMap(normalStrength);
       const normalTex = new THREE.CanvasTexture(normalCanvas);
       normalTex.needsUpdate = true;
       mat.normalMap = normalTex;
@@ -2209,31 +2104,8 @@ const designSys = {
       mat.needsUpdate = true;
     }
 
-    // Restore active face and redraw current face
     state.design.activeFace = prev;
     this.draw();
-  },
-
-  // Load SVG and draw it onto the design canvas
-  loadSVG(svgText) {
-    const blob = new Blob([svgText], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      const { width: W, height: H } = state.tile;
-      const S = this.scale;
-      // Center the SVG on the canvas
-      const scale = Math.min((W * S) / img.width, (H * S) / img.height) * 0.8;
-      const dw = img.width * scale;
-      const dh = img.height * scale;
-      const dx = (W * S - dw) / 2;
-      const dy = (H * S - dh) / 2;
-      this.ctx.drawImage(img, dx, dy, dw, dh);
-      URL.revokeObjectURL(url);
-      this.draw();
-      this.applyToTile();
-    };
-    img.src = url;
   },
 };
 
@@ -2284,60 +2156,65 @@ const flatLaySys = {
     const cols = Math.ceil(Math.sqrt(count * W / H));
     const rows = Math.ceil(count / cols);
 
-    // Single shared RoundedBoxGeometry with layer groups (same as buildTile)
+    // Clipping-plane approach matching buildTile(): one InstancedMesh per layer.
     const layers = state.layers;
-    const heightSegs = Math.max(layers.length * 4, 8);
-    const geo = new RoundedBoxGeometry(
+    const r = Math.min(Math.max(0.01, BR || 2), W/2 - 0.1, H/2 - 0.1, D/2 - 0.1);
+    const segs = Math.max(2, Math.min(16, BS || 8));
+
+    const sharedGeo = new RoundedBoxGeometry(
       W * UNIT, D * UNIT, H * UNIT,
-      4, heightSegs, 4,
-      Math.max(0.01, BR) * UNIT
+      segs, segs * 2, segs, r * UNIT
     );
 
     const totalD = layers.reduce((s, l) => s + l.thickness, 0);
-    const boundaries = [];
     let yAcc = -totalD / 2;
-    boundaries.push(yAcc * UNIT);
-    for (const layer of layers) {
+    const bands = layers.map(layer => {
+      const yMin = yAcc * UNIT;
+      const yMax = (yAcc + layer.thickness) * UNIT;
       yAcc += layer.thickness;
-      boundaries.push(yAcc * UNIT);
-    }
-    assignLayerGroups(geo, boundaries);
-
-    const materials = layers.map((layer, i) => {
-      const isTop = (i === layers.length - 1);
-      const opacity = isTop ? (layer.opacity ?? 100) : 100;
-      return makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
+      return { yMin, yMax };
     });
 
-    // One InstancedMesh for the whole tile (multi-material)
-    const iMesh = new THREE.InstancedMesh(geo, materials, count);
-    iMesh.castShadow = false;
-    iMesh.receiveShadow = true;
-
     const dummy = new THREE.Object3D();
-    let idx = 0;
-    for (let row = 0; row < rows && idx < count; row++) {
-      for (let col = 0; col < cols && idx < count; col++) {
-        let px = col * (W + gap);
-        let pz = row * (H + gap);
-        if (isIso && row % 2 === 1) px += (W + gap) * 0.5;
+    const totalW = (cols - 1) * (W + gap) + (isIso ? (W + gap) * 0.5 : 0);
+    const totalH_layout = (rows - 1) * (H + gap);
 
-        const totalW = (cols - 1) * (W + gap) + (isIso ? (W + gap) * 0.5 : 0);
-        const totalH = (rows - 1) * (H + gap);
-        const rot = (rand() - 0.5) * 2 * rotRange;
+    layers.forEach((layer, li) => {
+      const { yMin, yMax } = bands[li];
+      const opacity = (li === layers.length - 1) ? (layer.opacity ?? 100) : 100;
+      const mat = makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
+      mat.clippingPlanes = [
+        new THREE.Plane(new THREE.Vector3(0,  1, 0), -yMin),
+        new THREE.Plane(new THREE.Vector3(0, -1, 0),  yMax),
+      ];
+      mat.clipIntersection = false;
+      if (layer.material === 'acrylic') mat.side = THREE.DoubleSide;
 
-        dummy.position.set(px - totalW / 2, 0, pz - totalH / 2);
-        dummy.rotation.set(0, rot, 0);
-        dummy.updateMatrix();
-        iMesh.setMatrixAt(idx, dummy.matrix);
-        idx++;
+      const iMesh = new THREE.InstancedMesh(sharedGeo, mat, count);
+      iMesh.castShadow = false;
+      iMesh.receiveShadow = true;
+
+      let idx = 0;
+      for (let row = 0; row < rows && idx < count; row++) {
+        for (let col = 0; col < cols && idx < count; col++) {
+          let px = col * (W + gap);
+          let pz = row * (H + gap);
+          if (isIso && row % 2 === 1) px += (W + gap) * 0.5;
+          const rot = (rand() - 0.5) * 2 * rotRange;
+          dummy.position.set(px - totalW / 2, 0, pz - totalH_layout / 2);
+          dummy.rotation.set(0, rot, 0);
+          dummy.updateMatrix();
+          iMesh.setMatrixAt(idx, dummy.matrix);
+          idx++;
+        }
       }
-    }
 
-    iMesh.instanceMatrix.needsUpdate = true;
-    iMesh.count = idx;
-    flatLayGroup.add(iMesh);
-    this.meshes.push(iMesh);
+      iMesh.instanceMatrix.needsUpdate = true;
+      iMesh.count = idx;
+      flatLayGroup.add(iMesh);
+      this.meshes.push(iMesh);
+    });
+
     this.count = count;
   },
 
@@ -3052,6 +2929,15 @@ function initUI() {
   // Reset view
   document.getElementById('reset-view-btn')?.addEventListener('click', resetCamera);
 
+  // Refresh render
+  document.getElementById('refresh-render-btn')?.addEventListener('click', () => {
+    buildTile(tileIsExploded);
+    setupEnvironment();
+    updateLights();
+    if (designSys.canvas) designSys.applyToTile();
+    showToast('Render refreshed');
+  });
+
   // Flat lay controls
   document.getElementById('flatlay-count')?.addEventListener('change', e => {
     state.flatlay.count = parseInt(e.target.value);
@@ -3125,6 +3011,7 @@ function initUI() {
   edInp?.addEventListener('input', () => {
     state.engravingDepth = parseFloat(edInp.value);
     if (edVal) edVal.textContent = state.engravingDepth.toFixed(2) + 'mm';
+    designSys.applyToTile();
   });
 
   // Design modal
@@ -3165,25 +3052,12 @@ function initUI() {
     });
   });
 
-  // Tool selection
+  // Tool selection (select-only; upload buttons wired in designSys.init())
   document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
     btn.addEventListener('click', () => {
-      state.design.tool = btn.dataset.tool;
-      document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
     });
-  });
-
-  // SVG upload
-  document.getElementById('svg-upload-btn')?.addEventListener('click', () => {
-    document.getElementById('svg-file-input')?.click();
-  });
-  document.getElementById('svg-file-input')?.addEventListener('change', e => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => designSys.loadSVG(ev.target.result);
-    reader.readAsText(file);
   });
 
   // Delete element
