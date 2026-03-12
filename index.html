@@ -1379,6 +1379,14 @@ const UNIT = 1;        // 1 unit = 1 mm in scene space
 // into a layer boundary bucket, then rebuilds the index buffer
 // as contiguous groups. boundaries: cumulative Y values from bottom.
 function assignLayerGroups(geo, boundaries) {
+  // RoundedBoxGeometry may be non-indexed; ensure we have an index to work with.
+  if (!geo.index) {
+    const vertCount = geo.attributes.position.count;
+    const idx = new Uint32Array(vertCount);
+    for (let i = 0; i < vertCount; i++) idx[i] = i;
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  }
+
   const posAttr = geo.attributes.position;
   const srcIdx  = geo.index.array;
   const nTri    = srcIdx.length / 3;
