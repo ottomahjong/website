@@ -1235,6 +1235,7 @@ const renderer = new THREE.WebGLRenderer({
   preserveDrawingBuffer: true,  // needed for PNG export
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.localClippingEnabled = true;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -1368,105 +1369,91 @@ function makeMaterial(materialKey, finish, color, opacity = 100) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TILE GEOMETRY BUILDER
-// Single RoundedBoxGeometry mesh with material groups assigned
-// by Y-centroid binning (one group per layer).
+// TILE GEOMETRY BUILDER — Clipping Plane Architecture
+//
+// Each layer is a full copy of the shared RoundedBoxGeometry,
+// clipped to its Y band by two THREE.Plane clipping planes.
+// This gives pixel-perfect layer boundaries with zero triangle
+// seam artifacts. renderer.localClippingEnabled must be true.
 // ─────────────────────────────────────────────────────────────
-const EXPLODE_GAP = 8; // kept for legacy reference, not used
-const UNIT = 1;        // 1 unit = 1 mm in scene space
-
-// Assigns geometry groups by binning each triangle's Y-centroid
-// into a layer boundary bucket, then rebuilds the index buffer
-// as contiguous groups. boundaries: cumulative Y values from bottom.
-function assignLayerGroups(geo, boundaries) {
-  // RoundedBoxGeometry may be non-indexed; ensure we have an index to work with.
-  if (!geo.index) {
-    const vertCount = geo.attributes.position.count;
-    const idx = new Uint32Array(vertCount);
-    for (let i = 0; i < vertCount; i++) idx[i] = i;
-    geo.setIndex(new THREE.BufferAttribute(idx, 1));
-  }
-
-  const posAttr = geo.attributes.position;
-  const srcIdx  = geo.index.array;
-  const nTri    = srcIdx.length / 3;
-  const nLayers = boundaries.length - 1;
-
-  const buckets = Array.from({ length: nLayers }, () => []);
-  for (let t = 0; t < nTri; t++) {
-    const i0 = srcIdx[t * 3], i1 = srcIdx[t * 3 + 1], i2 = srcIdx[t * 3 + 2];
-    const cy = (posAttr.getY(i0) + posAttr.getY(i1) + posAttr.getY(i2)) / 3;
-    let bucket = nLayers - 1;
-    for (let b = 0; b < nLayers - 1; b++) {
-      if (cy < boundaries[b + 1] - 0.001) { bucket = b; break; }
-    }
-    buckets[bucket].push(i0, i1, i2);
-  }
-
-  const newIdx = new Uint32Array(srcIdx.length);
-  let cursor = 0;
-  geo.clearGroups();
-  for (let b = 0; b < nLayers; b++) {
-    const start = cursor;
-    for (const idx of buckets[b]) newIdx[cursor++] = idx;
-    if (buckets[b].length > 0) geo.addGroup(start, buckets[b].length, b);
-  }
-  geo.setIndex(new THREE.BufferAttribute(newIdx, 1));
-  geo.computeVertexNormals();
-}
-
-let tileMesh = null;   // single tile mesh
-let tileIsExploded = false; // tracked but unused with single-mesh approach
+const UNIT = 1;
+let tileMeshes = [];      // one mesh per layer
+let tileIsExploded = false;
+const EXPLODE_GAP = 8;
 
 function buildTile(exploded = false) {
   tileIsExploded = exploded;
-  // Clear existing mesh
-  if (tileMesh) {
-    tileGroup.remove(tileMesh);
-    tileMesh.geometry.dispose();
-    if (Array.isArray(tileMesh.material)) tileMesh.material.forEach(m => m.dispose());
-    else if (tileMesh.material) tileMesh.material.dispose();
-    tileMesh = null;
-  }
 
-  const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
+  // Dispose and remove all existing layer meshes
+  tileMeshes.forEach(m => {
+    tileGroup.remove(m);
+    // Do NOT dispose geometry — it is shared across all layer meshes
+    if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
+    else if (m.material) m.material.dispose();
+  });
+  tileMeshes = [];
 
   validateThicknesses();
 
-  const layers = state.layers;
-  const heightSegs = Math.max(layers.length * 4, 8);
+  const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
+  const r = Math.min(Math.max(0.01, BR || 2), W / 2 - 0.1, H / 2 - 0.1, D / 2 - 0.1);
+  const segs = Math.max(2, Math.min(16, BS || 8));
 
-  // RoundedBoxGeometry: X=width, Y=depth (stacking axis), Z=height
-  const geo = new RoundedBoxGeometry(
-    W * UNIT, D * UNIT, H * UNIT,
-    4, heightSegs, 4,
-    Math.max(0.01, BR) * UNIT
+  // One shared geometry for the full tile shape.
+  // X = tile width, Y = tile depth (stacking axis), Z = tile height (face)
+  const sharedGeo = new RoundedBoxGeometry(
+    W * UNIT,
+    D * UNIT,
+    H * UNIT,
+    segs,
+    segs * 2,
+    segs,
+    r * UNIT
   );
 
-  // Cumulative Y boundaries (geometry centered at Y=0)
-  const totalD = layers.reduce((s, l) => s + l.thickness, 0);
-  const boundaries = [];
+  // Compute cumulative Y boundaries for each layer.
+  // Geometry is centered at Y=0, so bottom = -D/2, top = +D/2.
+  const totalD = state.layers.reduce((s, l) => s + l.thickness, 0);
   let yAcc = -totalD / 2;
-  boundaries.push(yAcc * UNIT);
-  for (const layer of layers) {
+  const bands = state.layers.map(layer => {
+    const yMin = yAcc * UNIT;
+    const yMax = (yAcc + layer.thickness) * UNIT;
     yAcc += layer.thickness;
-    boundaries.push(yAcc * UNIT);
-  }
-
-  assignLayerGroups(geo, boundaries);
-
-  // Material array: index 0 = base/bottom, last = cap/top
-  const materials = layers.map((layer, i) => {
-    const isTop = (i === layers.length - 1);
-    const opacity = isTop ? (layer.opacity ?? 100) : 100;
-    return makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
+    return { yMin, yMax };
   });
 
-  tileMesh = new THREE.Mesh(geo, materials);
-  tileMesh.castShadow = true;
-  tileMesh.receiveShadow = true;
-  tileMesh.name = 'tile';
-  tileGroup.add(tileMesh);
+  state.layers.forEach((layer, i) => {
+    const { yMin, yMax } = bands[i];
+
+    const mat = makeMaterial(
+      layer.material,
+      layer.finish || 'gloss',
+      layer.color,
+      i === state.layers.length - 1 ? (layer.opacity ?? 100) : 100
+    );
+
+    // Two clipping planes restrict this mesh to its Y band:
+    //   Plane(normal=(0,1,0),  constant=-yMin) clips away y < yMin
+    //   Plane(normal=(0,-1,0), constant=yMax)  clips away y > yMax
+    mat.clippingPlanes = [
+      new THREE.Plane(new THREE.Vector3(0,  1, 0), -yMin),
+      new THREE.Plane(new THREE.Vector3(0, -1, 0),  yMax),
+    ];
+    mat.clipIntersection = false;
+
+    // DoubleSide ensures back faces are visible through transparent acrylic
+    if (layer.material === 'acrylic') mat.side = THREE.DoubleSide;
+
+    const mesh = new THREE.Mesh(sharedGeo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.name = layer.name;
+
+    if (exploded) mesh.position.y = i * EXPLODE_GAP;
+
+    tileGroup.add(mesh);
+    tileMeshes.push(mesh);
+  });
 
   applyDesignTexture();
   updateStackDiagram();
@@ -1575,7 +1562,7 @@ const LIGHT_PRESETS = {
     keyColor:   0xfff8f0,
     keyInt:     3.5,
     fillPos:    [-30, -20, -40],
-    fillColor:  0x8090ff,
+    fillColor:  0xffe0c0,
     fillInt:    0.6,
     ambColor:   0x111111,
     ambInt:     0.15,
@@ -1647,10 +1634,10 @@ function updateLights() {
   }
 
   // Update env map intensity on all materials
-  if (tileMesh) {
-    const mats = Array.isArray(tileMesh.material) ? tileMesh.material : [tileMesh.material];
+  tileMeshes.forEach(mesh => {
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     mats.forEach(m => { if (m) m.envMapIntensity = s.envIntensity; });
-  }
+  });
 
   renderer.toneMappingExposure = state.lighting.preset === 'studio' ? 1.0 : 1.2;
 }
@@ -2204,16 +2191,9 @@ const designSys = {
     this.draw(); // render that face's elements to this.canvas
 
     const isFaceA = face === 'A';
-    // Single mesh with material array: Face A → last material (cap/top), Face B → material[0] (base)
-    let mat = null;
-    if (tileMesh) {
-      const mats = tileMesh.material;
-      if (Array.isArray(mats)) {
-        mat = isFaceA ? mats[mats.length - 1] : mats[0];
-      } else {
-        mat = mats;
-      }
-    }
+    // Clipping-plane arch: one mesh per layer. Face A → last mesh (cap/top), Face B → first mesh (base)
+    const targetMesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
+    const mat = targetMesh?.material ?? null;
 
     if (mat) {
       const colorTex = new THREE.CanvasTexture(this.canvas);
