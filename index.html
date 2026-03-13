@@ -1545,32 +1545,37 @@ function buildTile(exploded = false) {
 // Shows a warning if adjustment was needed.
 // ─────────────────────────────────────────────────────────────
 function validateThicknesses() {
-  const total = state.layers.reduce((s, l) => s + l.thickness, 0);
   const target = state.tile.depth;
   const warning = document.getElementById('thickness-warning');
 
-  if (Math.abs(total - target) > 0.01) {
-    // Auto-adjust the thickest middle layer, or layer 0 if only 1 layer
-    const n = state.layers.length;
-    let adjustIdx = 0;
-    if (n >= 3) {
-      // Find thickest middle layer (not first or last)
-      let maxT = -1;
-      for (let i = 1; i < n - 1; i++) {
-        if (state.layers[i].thickness > maxT) { maxT = state.layers[i].thickness; adjustIdx = i; }
-      }
-    } else if (n === 2) {
-      adjustIdx = 1;
+  // Sum all layers EXCEPT Base (index 0)
+  const otherSum = state.layers
+    .slice(1)
+    .reduce((s, l) => s + (parseFloat(l.thickness) || 0), 0);
+
+  const newBase = Math.round(Math.max(0.5, target - otherSum) * 100) / 100;
+
+  if (Math.abs(state.layers[0].thickness - newBase) > 0.001) {
+    state.layers[0].thickness = newBase;
+
+    // Update the Base layer input and badge in the UI
+    const baseInput = document.querySelector('[data-layer-thickness="0"]');
+    const baseBadge = document.getElementById('badge-0');
+    if (baseInput) baseInput.value = newBase;
+    if (baseBadge) baseBadge.textContent = newBase + 'mm auto';
+  }
+
+  // Show warning only if other layers alone exceed total depth
+  if (otherSum >= target) {
+    if (warning) {
+      warning.style.display = 'block';
+      warning.textContent = `⚠ Other layers (${otherSum}mm) exceed total depth (${target}mm). Reduce a layer thickness.`;
     }
-    const otherSum = state.layers.reduce((s, l, i) => i !== adjustIdx ? s + l.thickness : s, 0);
-    state.layers[adjustIdx].thickness = Math.round(Math.max(0.5, target - otherSum) * 10) / 10;
-    if (warning) warning.style.display = 'block';
-    const inp = document.querySelector(`[data-layer-thickness="${adjustIdx}"]`);
-    if (inp) inp.value = state.layers[adjustIdx].thickness;
-    updateStackDiagram();
   } else {
     if (warning) warning.style.display = 'none';
   }
+
+  updateStackDiagram();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2830,17 +2835,24 @@ function buildLayerUI() {
            aria-expanded="${layer.expanded}" aria-controls="layer-body-${i}">
         <div class="layer-color-swatch" id="swatch-${i}" style="background:${layer.color}"></div>
         <span class="layer-name">${layer.name}</span>
-        <span class="layer-thickness-badge" id="badge-${i}">${layer.thickness}mm</span>
+        <span class="layer-thickness-badge" id="badge-${i}">${layer.thickness}mm${isBase ? ' auto' : ''}</span>
         ${(!isLocked && canRemove) ? `<button class="layer-remove-btn" data-layer-remove="${i}" aria-label="Remove ${layer.name}" title="Remove layer" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:0.9rem;padding:0 2px;line-height:1;">✕</button>` : ''}
         <span style="font-size:0.7rem;color:var(--text-secondary);margin-left:2px;">${layer.expanded ? '▾' : '▸'}</span>
       </div>
       <div class="layer-body ${layer.expanded ? '' : 'hidden'}" id="layer-body-${i}">
         <div class="layer-row">
           <label for="layer-thick-${i}">Thickness</label>
-          <input type="number" id="layer-thick-${i}" data-layer-thickness="${i}"
-                 value="${layer.thickness}" min="0.5" max="50" step="0.5"
-                 aria-label="${layer.name} thickness in mm">
-          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+          ${isBase
+            ? `<input type="number" id="layer-thick-${i}" data-layer-thickness="${i}"
+                     value="${layer.thickness}" min="0.5" max="50" step="0.5"
+                     readonly tabindex="-1"
+                     style="opacity:0.5;cursor:default;background:#0a0a0a;"
+                     aria-label="${layer.name} thickness (auto-calculated)">`
+            : `<input type="number" id="layer-thick-${i}" data-layer-thickness="${i}"
+                     value="${layer.thickness}" min="0.5" max="50" step="0.5"
+                     aria-label="${layer.name} thickness in mm">`
+          }
+          <span style="font-size:0.75rem;color:var(--text-secondary);">${isBase ? 'mm (auto)' : 'mm'}</span>
         </div>
         <div class="layer-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
           <label style="margin-bottom:2px;">Material</label>
@@ -2933,6 +2945,7 @@ function buildLayerUI() {
 
     if (el.dataset.layerThickness !== undefined) {
       const i = parseInt(el.dataset.layerThickness);
+      if (i === 0) return; // Base is auto-calculated, never manually changed
       state.layers[i].thickness = parseFloat(el.value) || 0.5;
       document.getElementById(`badge-${i}`).textContent = state.layers[i].thickness + 'mm';
       validateThicknesses();
