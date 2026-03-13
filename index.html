@@ -921,6 +921,9 @@ input[type="checkbox"] {
           <input type="range"  id="dim-bevel-segs-range" min="1" max="16" step="1" value="8" style="flex:1;min-width:0;" aria-label="Smoothness slider">
           <input type="number" id="dim-bevel-segs" value="8" min="1" max="16" step="1" style="width:60px;" aria-label="Bevel segments">
         </div>
+        <div class="field-row" style="justify-content:flex-end;">
+          <button id="btn-reset-corners" style="font-size:0.75rem;padding:2px 8px;cursor:pointer;" aria-label="Reset bevel to defaults">Reset corners</button>
+        </div>
         <!-- Scale reference -->
         <div id="scale-ref">
           <div id="scale-rect"></div>
@@ -3067,6 +3070,18 @@ function initUI() {
     };
     numEl.addEventListener('input',   () => apply(numEl.value));
     rangeEl.addEventListener('input', () => apply(rangeEl.value));
+  });
+
+  // Reset corners button
+  document.getElementById('btn-reset-corners')?.addEventListener('click', () => {
+    state.tile.bevelRadius = 2;
+    state.tile.bevelSegments = 8;
+    document.getElementById('dim-bevel-radius').value       = '2.000';
+    document.getElementById('dim-bevel-radius-range').value = '2';
+    document.getElementById('dim-bevel-segs').value         = '8';
+    document.getElementById('dim-bevel-segs-range').value   = '8';
+    buildTile(tileIsExploded);
+    updateFlatLay();
   });
 
   // View mode buttons
