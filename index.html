@@ -912,13 +912,14 @@ input[type="checkbox"] {
         </div>
         <div class="field-row">
           <label for="dim-bevel-radius">Edge bevel</label>
-          <input type="number" id="dim-bevel-radius" value="2" min="0.1" max="8" step="0.25" aria-label="Edge bevel radius in mm">
+          <input type="range"  id="dim-bevel-radius-range" min="0" max="10" step="0.001" value="2" style="flex:1;min-width:0;" aria-label="Edge bevel radius slider">
+          <input type="number" id="dim-bevel-radius" value="2.000" min="0" max="10" step="0.001" style="width:60px;" aria-label="Edge bevel radius in mm">
           <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
         </div>
         <div class="field-row">
           <label for="dim-bevel-segs">Smoothness</label>
-          <input type="number" id="dim-bevel-segs" value="8" min="2" max="16" step="1" aria-label="Bevel segments">
-          <span style="font-size:0.75rem;color:var(--text-secondary);"></span>
+          <input type="range"  id="dim-bevel-segs-range" min="1" max="16" step="1" value="8" style="flex:1;min-width:0;" aria-label="Smoothness slider">
+          <input type="number" id="dim-bevel-segs" value="8" min="1" max="16" step="1" style="width:60px;" aria-label="Bevel segments">
         </div>
         <!-- Scale reference -->
         <div id="scale-ref">
@@ -1472,6 +1473,7 @@ function buildTile(exploded = false) {
   // MeshBasicMaterial: unlit so the design isn't affected by scene lighting
   const matA = new THREE.MeshBasicMaterial({
     transparent: true,
+    alphaTest: 0.01,            // discard fully-transparent pixels (rounded corners, empty areas)
     depthWrite: false,          // prevents z-fighting with Cap surface
     polygonOffset: true,
     polygonOffsetFactor: -1,
@@ -1490,6 +1492,7 @@ function buildTile(exploded = false) {
 
   const matB = new THREE.MeshBasicMaterial({
     transparent: true,
+    alphaTest: 0.01,            // discard fully-transparent pixels (rounded corners, empty areas)
     depthWrite: false,
     polygonOffset: true,
     polygonOffsetFactor: -1,
@@ -2135,6 +2138,45 @@ const designSys = {
     return out;
   },
 
+  // Renders only image elements onto this.canvas with:
+  // - transparent background (no face color fill, no grid)
+  // - rounded-rect clip matching the tile's bevel corner radius
+  // Used exclusively for GPU texture capture — not for the 2D editor display.
+  drawForTexture() {
+    const { width: W, height: H, bevelRadius: BR } = state.tile;
+    const S = this.scale;
+    const ctx = this.ctx;
+
+    ctx.clearRect(0, 0, W * S, H * S);
+
+    // Clip to rounded rect so transparent corners mask out past the bevel edge
+    const r = Math.min((BR || 0) * S, (W * S) / 2, (H * S) / 2);
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(0, 0, W * S, H * S, r);
+    ctx.clip();
+
+    this.elements.forEach(el => {
+      if (!el.imgEl) return;
+      const offW = Math.ceil(el.w * S);
+      const offH = Math.ceil(el.h * S);
+      if (offW < 1 || offH < 1) return;
+      const off = document.createElement('canvas');
+      off.width = offW; off.height = offH;
+      const offCtx = off.getContext('2d');
+      offCtx.drawImage(el.imgEl, 0, 0, offW, offH);
+      if (el.fillOpacity > 0) {
+        offCtx.globalAlpha = el.fillOpacity;
+        offCtx.globalCompositeOperation = 'source-atop';
+        offCtx.fillStyle = el.fillColor || '#AF6B4F';
+        offCtx.fillRect(0, 0, offW, offH);
+      }
+      ctx.drawImage(off, el.x * S, el.y * S);
+    });
+
+    ctx.restore();
+  },
+
   applyToTile() {
     this.applyFaceTexture('A');
     this.applyFaceTexture('B');
@@ -2143,7 +2185,7 @@ const designSys = {
   applyFaceTexture(face) {
     const prev = state.design.activeFace;
     state.design.activeFace = face;
-    this.draw();  // renders this face's elements onto this.canvas
+    this.drawForTexture();  // renders elements onto this.canvas with transparent bg + bevel clip
 
     const isFaceA = face === 'A';
     // Target the decal plane for this face — NOT the layer mesh material
@@ -2916,8 +2958,13 @@ function syncUIFromState() {
   const fields = { 'dim-width': 'width', 'dim-height': 'height', 'dim-depth': 'depth', 'dim-bevel-radius': 'bevelRadius', 'dim-bevel-segs': 'bevelSegments' };
   Object.entries(fields).forEach(([id, key]) => {
     const el = document.getElementById(id);
-    if (el) el.value = state.tile[key];
+    if (el) el.value = id === 'dim-bevel-radius' ? parseFloat(state.tile[key]).toFixed(3) : state.tile[key];
   });
+  // Sync slider siblings for paired bevel controls
+  const brRange = document.getElementById('dim-bevel-radius-range');
+  if (brRange) brRange.value = state.tile.bevelRadius;
+  const bsRange = document.getElementById('dim-bevel-segs-range');
+  if (bsRange) bsRange.value = state.tile.bevelSegments;
 
   updateScaleRef();
 
@@ -2983,8 +3030,8 @@ function initUI() {
   // Dimension inputs
   const dimInputs = [
     ['dim-width', 'width'], ['dim-height', 'height'],
-    ['dim-depth', 'depth'], ['dim-bevel-radius', 'bevelRadius'],
-    ['dim-bevel-segs', 'bevelSegments'],
+    ['dim-depth', 'depth'],
+    // bevel inputs wired separately below as paired slider+number controls
   ];
   dimInputs.forEach(([id, key]) => {
     const inp = document.getElementById(id);
@@ -3001,6 +3048,25 @@ function initUI() {
         designSys.draw();
       }
     });
+  });
+
+  // Paired bevel controls — slider and number input stay in sync
+  [
+    ['dim-bevel-radius', 'dim-bevel-radius-range', 'bevelRadius', v => parseFloat(v).toFixed(3)],
+    ['dim-bevel-segs',   'dim-bevel-segs-range',   'bevelSegments', v => String(parseInt(v))],
+  ].forEach(([numId, rangeId, key, fmt]) => {
+    const numEl   = document.getElementById(numId);
+    const rangeEl = document.getElementById(rangeId);
+    if (!numEl || !rangeEl) return;
+    const apply = (val) => {
+      state.tile[key] = parseFloat(val) || 0;
+      numEl.value   = fmt(val);
+      rangeEl.value = val;
+      buildTile(tileIsExploded);
+      updateFlatLay();
+    };
+    numEl.addEventListener('input',   () => apply(numEl.value));
+    rangeEl.addEventListener('input', () => apply(rangeEl.value));
   });
 
   // View mode buttons
