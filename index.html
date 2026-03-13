@@ -1380,6 +1380,8 @@ function makeMaterial(materialKey, finish, color, opacity = 100) {
 const UNIT = 1;
 let tileMeshes = [];      // one mesh per layer
 let tileIsExploded = false;
+let facePlaneA = null;  // decal plane: Face A texture on top of Cap
+let facePlaneB = null;  // decal plane: Face B texture on bottom of Base
 const EXPLODE_GAP = 8;
 
 function buildTile(exploded = false) {
@@ -1455,6 +1457,52 @@ function buildTile(exploded = false) {
     tileGroup.add(mesh);
     tileMeshes.push(mesh);
   });
+
+  // ── Face decal planes ──────────────────────────────────────────
+  // Two thin PlaneGeometry meshes sit just above/below the tile surface.
+  // Their textures come only from the design canvas — not from the
+  // layer material UVs — so the image appears on exactly one flat face.
+
+  // Dispose old decal planes
+  if (facePlaneA) { tileGroup.remove(facePlaneA); facePlaneA.geometry.dispose(); facePlaneA.material.dispose(); facePlaneA = null; }
+  if (facePlaneB) { tileGroup.remove(facePlaneB); facePlaneB.geometry.dispose(); facePlaneB.material.dispose(); facePlaneB = null; }
+
+  const { width: W_tile, height: H_tile, depth: D_tile } = state.tile;
+
+  // MeshBasicMaterial: unlit so the design isn't affected by scene lighting
+  const matA = new THREE.MeshBasicMaterial({
+    transparent: true,
+    depthWrite: false,          // prevents z-fighting with Cap surface
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+    side: THREE.FrontSide,
+  });
+  const planeGeoA = new THREE.PlaneGeometry(W_tile * UNIT, H_tile * UNIT);
+  facePlaneA = new THREE.Mesh(planeGeoA, matA);
+  // PlaneGeometry faces +Z by default; rotate so it faces +Y (upward)
+  facePlaneA.rotation.x = -Math.PI / 2;
+  // Position at top of tile, slightly above Cap surface
+  const explodeOffset = exploded ? (state.layers.length - 1) * EXPLODE_GAP : 0;
+  facePlaneA.position.y = (D_tile / 2 + 0.3) * UNIT + explodeOffset;
+  facePlaneA.name = 'facePlaneA';
+  tileGroup.add(facePlaneA);
+
+  const matB = new THREE.MeshBasicMaterial({
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+    side: THREE.BackSide,       // BackSide so it's visible when looking up at the bottom
+  });
+  const planeGeoB = new THREE.PlaneGeometry(W_tile * UNIT, H_tile * UNIT);
+  facePlaneB = new THREE.Mesh(planeGeoB, matB);
+  facePlaneB.rotation.x = Math.PI / 2;
+  // Position at bottom of tile, slightly below Base surface
+  facePlaneB.position.y = (-D_tile / 2 - 0.3) * UNIT;
+  facePlaneB.name = 'facePlaneB';
+  tileGroup.add(facePlaneB);
 
   applyDesignTexture();
   updateStackDiagram();
@@ -1863,15 +1911,31 @@ const designSys = {
     this.elements.forEach(el => {
       if (!el.imgEl) return;
       ctx.save();
-      ctx.drawImage(el.imgEl, el.x * S, el.y * S, el.w * S, el.h * S);
+
+      // Draw image to an isolated offscreen canvas so compositing
+      // operates only within that element's pixel footprint
+      const offW = Math.ceil(el.w * S);
+      const offH = Math.ceil(el.h * S);
+      if (offW < 1 || offH < 1) { ctx.restore(); return; }
+
+      const off = document.createElement('canvas');
+      off.width = offW; off.height = offH;
+      const offCtx = off.getContext('2d');
+
+      // Step 1: draw the image at full size into the offscreen canvas
+      offCtx.drawImage(el.imgEl, 0, 0, offW, offH);
+
+      // Step 2: if fill color/opacity is set, tint ONLY the pixels the
+      // image actually drew — source-atop ignores transparent areas
       if (el.fillOpacity > 0) {
-        ctx.globalAlpha = el.fillOpacity;
-        ctx.globalCompositeOperation = 'multiply';
-        ctx.fillStyle = el.fillColor || '#AF6B4F';
-        ctx.fillRect(el.x * S, el.y * S, el.w * S, el.h * S);
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1;
+        offCtx.globalAlpha = el.fillOpacity;
+        offCtx.globalCompositeOperation = 'source-atop';
+        offCtx.fillStyle = el.fillColor || '#AF6B4F';
+        offCtx.fillRect(0, 0, offW, offH);
       }
+
+      // Step 3: composite the finished offscreen onto the main canvas
+      ctx.drawImage(off, el.x * S, el.y * S);
       ctx.restore();
     });
 
@@ -2079,22 +2143,41 @@ const designSys = {
   applyFaceTexture(face) {
     const prev = state.design.activeFace;
     state.design.activeFace = face;
-    this.draw();
+    this.draw();  // renders this face's elements onto this.canvas
 
     const isFaceA = face === 'A';
-    const mesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
+    // Target the decal plane for this face — NOT the layer mesh material
+    const plane = isFaceA ? facePlaneA : facePlaneB;
 
-    if (mesh && mesh.material) {
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (plane && plane.material) {
+      const mat = plane.material;
 
-      if (mat.map) mat.map.dispose();
-      if (mat.normalMap) mat.normalMap.dispose();
+      // Dispose old texture to avoid GPU memory leak
+      if (mat.map) { mat.map.dispose(); mat.map = null; }
 
-      const colorTex = new THREE.CanvasTexture(this.canvas);
-      colorTex.colorSpace = THREE.SRGBColorSpace;
-      colorTex.needsUpdate = true;
-      mat.map = colorTex;
+      // Only create a texture if there are elements to show
+      if (this.activeFaceData.elements.length > 0) {
+        const colorTex = new THREE.CanvasTexture(this.canvas);
+        colorTex.colorSpace = THREE.SRGBColorSpace;
+        colorTex.needsUpdate = true;
+        mat.map = colorTex;
+        mat.opacity = 1;
+      } else {
+        mat.map = null;
+        mat.opacity = 0;
+      }
+      mat.needsUpdate = true;
+    }
 
+    // Also update the normal map on the Cap/Base layer mesh
+    // (this gives the embossed bump effect without affecting other faces)
+    const layerMesh = isFaceA
+      ? tileMeshes[tileMeshes.length - 1]
+      : tileMeshes[0];
+
+    if (layerMesh && layerMesh.material && this.activeFaceData.elements.length > 0) {
+      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
+      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
       const normalStrength = state.engravingDepth * 8;
       const normalCanvas = this.generateNormalMap(normalStrength);
       const normalTex = new THREE.CanvasTexture(normalCanvas);
@@ -2102,19 +2185,23 @@ const designSys = {
       mat.normalMap = normalTex;
       mat.normalScale = new THREE.Vector2(1, 1);
       mat.needsUpdate = true;
+    } else if (layerMesh && layerMesh.material) {
+      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
+      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
+      mat.needsUpdate = true;
     }
 
     state.design.activeFace = prev;
-    this.draw();
+    this.draw();  // restore the previously active face to the canvas
   },
 };
 
 // Wrapper: apply both face designs to the tile (called from buildTile)
 function applyDesignTexture() {
   if (!designSys.canvas) return;
-  const hasA = state.design.faceA.elements.length > 0;
-  const hasB = state.design.faceB.elements.length > 0;
-  if (hasA || hasB) designSys.applyToTile();
+  // Always apply both faces — applyFaceTexture handles empty state
+  // by hiding the decal plane (opacity 0 / no map)
+  designSys.applyToTile();
 }
 
 // ─────────────────────────────────────────────────────────────
