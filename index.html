@@ -1403,20 +1403,20 @@ function buildTile(exploded = false) {
   validateThicknesses();
 
   const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
-  const r = Math.min(Math.max(0.01, BR || 2), W / 2 - 0.1, H / 2 - 0.1, D / 2 - 0.1);
-  const segs = Math.max(2, Math.min(16, BS || 8));
+  const r = BR || 0;
+  const segs = Math.max(1, Math.round(BS || 8));
+  const W_mm = W * UNIT, D_mm = D * UNIT, H_mm = H * UNIT;
 
   // One shared geometry for the full tile shape.
   // X = tile width, Y = tile depth (stacking axis), Z = tile height (face)
-  const sharedGeo = new RoundedBoxGeometry(
-    W * UNIT,
-    D * UNIT,
-    H * UNIT,
-    segs,
-    segs * 2,
-    segs,
-    r * UNIT
-  );
+  // RoundedBoxGeometry signature: (width, height, depth, segments, radius)
+  let sharedGeo;
+  if (r < 0.001) {
+    sharedGeo = new THREE.BoxGeometry(W_mm, D_mm, H_mm);
+  } else {
+    const clampedR = Math.min(r * UNIT, W_mm / 2 - 0.01, D_mm / 2 - 0.01, H_mm / 2 - 0.01);
+    sharedGeo = new RoundedBoxGeometry(W_mm, D_mm, H_mm, segs, clampedR);
+  }
 
   // Compute cumulative Y boundaries for each layer.
   // Geometry is centered at Y=0, so bottom = -D/2, top = +D/2.
@@ -2290,13 +2290,18 @@ const flatLaySys = {
 
     // Clipping-plane approach matching buildTile(): one InstancedMesh per layer.
     const layers = state.layers;
-    const r = Math.min(Math.max(0.01, BR || 2), W/2 - 0.1, H/2 - 0.1, D/2 - 0.1);
-    const segs = Math.max(2, Math.min(16, BS || 8));
+    const r = BR || 0;
+    const segs = Math.max(1, Math.round(BS || 8));
+    const W_mm = W * UNIT, D_mm = D * UNIT, H_mm = H * UNIT;
 
-    const sharedGeo = new RoundedBoxGeometry(
-      W * UNIT, D * UNIT, H * UNIT,
-      segs, segs * 2, segs, r * UNIT
-    );
+    // RoundedBoxGeometry signature: (width, height, depth, segments, radius)
+    let sharedGeo;
+    if (r < 0.001) {
+      sharedGeo = new THREE.BoxGeometry(W_mm, D_mm, H_mm);
+    } else {
+      const clampedR = Math.min(r * UNIT, W_mm / 2 - 0.01, D_mm / 2 - 0.01, H_mm / 2 - 0.01);
+      sharedGeo = new RoundedBoxGeometry(W_mm, D_mm, H_mm, segs, clampedR);
+    }
 
     const totalD = layers.reduce((s, l) => s + l.thickness, 0);
     let yAcc = -totalD / 2;
