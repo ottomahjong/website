@@ -1183,10 +1183,10 @@ const state = {
   // material: key from MATERIALS ('resin'|'acrylic'|'metallic'|'wood')
   // finish: 'matte'|'gloss'
   layers: [
-    { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false },
-    { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false },
-    { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false },
-    { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85 },
+    { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false, textureSrc: null, textureEnabled: true },
+    { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false, textureSrc: null, textureEnabled: true },
+    { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false, textureSrc: null, textureEnabled: true },
+    { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85,     textureSrc: null, textureEnabled: true },
   ],
 
   // Face design elements array — each element has:
@@ -1357,7 +1357,7 @@ function makeGrainTexture(type, tileW, tileH) {
 // color: hex string
 // opacity: 0–100 (only applied for non-transmissive materials)
 // ─────────────────────────────────────────────────────────────
-function makeMaterial(materialKey, finish, color, opacity = 100) {
+function makeMaterial(materialKey, finish, color, opacity = 100, layer = null) {
   const def = MATERIALS[materialKey] || MATERIALS['resin'];
   const params = { ...def[finish] || def.gloss };
 
@@ -1370,7 +1370,30 @@ function makeMaterial(materialKey, finish, color, opacity = 100) {
     params.opacity = opacity / 100;
   }
 
-  return new THREE.MeshPhysicalMaterial(params);
+  const mat = new THREE.MeshPhysicalMaterial(params);
+
+  // Apply per-layer surface texture if present and enabled
+  if (layer && layer.textureSrc && layer.textureEnabled) {
+    const img = new Image();
+    img.onload = () => {
+      const tex = new THREE.CanvasTexture(img);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(1, 1);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      mat.map = tex;
+      // Metallic layers: also drive roughnessMap so light variation
+      // creates shimmer visible through the acrylic Cap above.
+      if (materialKey === 'metallic') {
+        mat.roughnessMap = tex;
+        mat.envMapIntensity = 3.0;
+      }
+      mat.needsUpdate = true;
+    };
+    img.src = layer.textureSrc;
+  }
+
+  return mat;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1436,7 +1459,8 @@ function buildTile(exploded = false) {
       layer.material,
       layer.finish || 'gloss',
       layer.color,
-      i === state.layers.length - 1 ? (layer.opacity ?? 100) : 100
+      i === state.layers.length - 1 ? (layer.opacity ?? 100) : 100,
+      layer
     );
 
     // Two clipping planes restrict this mesh to its Y band:
@@ -1757,6 +1781,7 @@ const designSys = {
   dragEl: null,
   nextId: 1,
   _updatingThumb: false,
+  _drawingFor3D: false,
 
   get activeFaceData() { return state.design['face' + state.design.activeFace]; },
   get elements()       { return this.activeFaceData.elements; },
@@ -1889,7 +1914,15 @@ const designSys = {
     this.dragEl = null;
   },
 
+  // Switcher: routes to 3D-texture path or editor path based on flag.
+  // All existing callers use draw() and get the editor view by default.
   draw() {
+    if (this._drawingFor3D) { this.drawFor3D(); } else { this.drawEditor(); }
+  },
+
+  // Full editor draw — background fill + grid + images + selection handles.
+  // Used for the 2D modal canvas only; never captured as a GPU texture.
+  drawEditor() {
     const { width: W, height: H } = state.tile;
     const S = this.scale;
     const ctx = this.ctx;
@@ -2141,18 +2174,17 @@ const designSys = {
     return out;
   },
 
-  // Renders only image elements onto this.canvas with:
-  // - transparent background (no face color fill, no grid)
-  // - rounded-rect clip matching the tile's bevel corner radius
-  // Used exclusively for GPU texture capture — not for the 2D editor display.
-  drawForTexture() {
+  // 3D texture draw — transparent background + bevel clip + images only.
+  // No face background fill, no grid, no selection handles.
+  // Called via draw() when _drawingFor3D is true.
+  drawFor3D() {
     const { width: W, height: H, bevelRadius: BR } = state.tile;
     const S = this.scale;
     const ctx = this.ctx;
 
     ctx.clearRect(0, 0, W * S, H * S);
 
-    // Clip to rounded rect so transparent corners mask out past the bevel edge
+    // Clip to rounded rect so corners are transparent beyond the bevel edge
     const r = Math.min((BR || 0) * S, (W * S) / 2, (H * S) / 2);
     ctx.save();
     ctx.beginPath();
@@ -2188,7 +2220,9 @@ const designSys = {
   applyFaceTexture(face) {
     const prev = state.design.activeFace;
     state.design.activeFace = face;
-    this.drawForTexture();  // renders elements onto this.canvas with transparent bg + bevel clip
+    this._drawingFor3D = true;
+    this.draw();  // routes to drawFor3D() — transparent bg, no grid, bevel clip
+    this._drawingFor3D = false;
 
     const isFaceA = face === 'A';
     // Target the decal plane for this face — NOT the layer mesh material
@@ -2319,7 +2353,7 @@ const flatLaySys = {
     layers.forEach((layer, li) => {
       const { yMin, yMax } = bands[li];
       const opacity = (li === layers.length - 1) ? (layer.opacity ?? 100) : 100;
-      const mat = makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity);
+      const mat = makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity, layer);
       mat.clippingPlanes = [
         new THREE.Plane(new THREE.Vector3(0,  1, 0), -yMin),
         new THREE.Plane(new THREE.Vector3(0, -1, 0),  yMax),
@@ -2668,10 +2702,10 @@ const presetSys = {
     config: {
       tile: { width: 36, height: 47, depth: 22, bevelRadius: 2, bevelSegments: 8 },
       layers: [
-        { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false },
-        { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false },
-        { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false },
-        { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85 },
+        { name: 'Base',  thickness: 8,  material: 'resin',    finish: 'matte', color: '#E8EEF2', expanded: false, textureSrc: null, textureEnabled: true },
+        { name: 'Body',  thickness: 10, material: 'resin',    finish: 'gloss', color: '#1A2137', expanded: false, textureSrc: null, textureEnabled: true },
+        { name: 'Inlay', thickness: 2,  material: 'metallic', finish: 'matte', color: '#AF6B4F', expanded: false, textureSrc: null, textureEnabled: true },
+        { name: 'Cap',   thickness: 2,  material: 'acrylic',  finish: 'gloss', color: '#F5E8DC', expanded: false, opacity: 85,     textureSrc: null, textureEnabled: true },
       ],
       engravingDepth: 0.5,
       lighting: { preset: 'studio', keyIntensity: 2.5, fillIntensity: 0.4, ambientIntensity: 0.05, envIntensity: 1.0 },
@@ -2829,10 +2863,46 @@ function buildLayerUI() {
                  aria-label="Cap layer opacity">
           <span id="opacity-val-${i}" style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-secondary);flex:0 0 36px;">${layer.opacity ?? 100}%</span>
         </div>` : ''}
+        <div class="layer-row" style="flex-direction:column;align-items:flex-start;gap:4px;">
+          <label style="margin-bottom:2px;">Surface Texture</label>
+          <div style="display:flex;gap:6px;align-items:center;width:100%;">
+            <button type="button" class="btn btn-sm" data-layer-tex-upload="${i}"
+                    style="flex:1;" title="Upload texture image">Upload PNG/SVG</button>
+            <button type="button" class="btn btn-sm layer-tex-toggle"
+                    data-layer-tex-toggle="${i}"
+                    style="width:32px;opacity:${layer.textureSrc ? 1 : 0.3};"
+                    title="Toggle texture visibility">${layer.textureEnabled !== false ? '◉' : '○'}</button>
+            <button type="button" class="btn btn-sm btn-ghost"
+                    data-layer-tex-clear="${i}"
+                    style="width:32px;display:${layer.textureSrc ? 'flex' : 'none'};"
+                    title="Remove texture">✕</button>
+          </div>
+          ${layer.textureSrc ? `<div style="font-size:0.68rem;color:var(--text-secondary);margin-top:2px;">Texture loaded</div>` : ''}
+          <input type="file" id="tex-file-${i}" accept=".png,.jpg,.jpeg,.webp,.svg" style="display:none;">
+        </div>
       </div>
     `;
 
     stack.appendChild(card);
+  });
+
+  // File input change handlers for per-layer texture upload
+  state.layers.forEach((layer, i) => {
+    const fileInp = document.getElementById(`tex-file-${i}`);
+    if (!fileInp) return;
+    fileInp.addEventListener('change', e => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        state.layers[i].textureSrc = ev.target.result;
+        state.layers[i].textureEnabled = true;
+        buildTile(tileIsExploded);
+        buildLayerUI();
+      };
+      reader.readAsDataURL(file);
+      fileInp.value = '';
+    });
   });
 
   // "+ Add Layer" button (only shown when < 4 layers)
@@ -2932,6 +3002,38 @@ function buildLayerUI() {
       validateThicknesses();
       buildTile(tileIsExploded);
       updateFlatLay();
+      buildLayerUI();
+      return;
+    }
+
+    // Texture upload button
+    const texUploadBtn = e.target.closest('[data-layer-tex-upload]');
+    if (texUploadBtn) {
+      e.stopPropagation();
+      const i = parseInt(texUploadBtn.dataset.layerTexUpload);
+      document.getElementById(`tex-file-${i}`)?.click();
+      return;
+    }
+
+    // Texture visibility toggle
+    const texToggleBtn = e.target.closest('[data-layer-tex-toggle]');
+    if (texToggleBtn) {
+      e.stopPropagation();
+      const i = parseInt(texToggleBtn.dataset.layerTexToggle);
+      state.layers[i].textureEnabled = !state.layers[i].textureEnabled;
+      texToggleBtn.textContent = state.layers[i].textureEnabled ? '◉' : '○';
+      buildTile(tileIsExploded);
+      return;
+    }
+
+    // Texture clear button
+    const texClearBtn = e.target.closest('[data-layer-tex-clear]');
+    if (texClearBtn) {
+      e.stopPropagation();
+      const i = parseInt(texClearBtn.dataset.layerTexClear);
+      state.layers[i].textureSrc = null;
+      state.layers[i].textureEnabled = true;
+      buildTile(tileIsExploded);
       buildLayerUI();
       return;
     }
