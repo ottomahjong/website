@@ -501,6 +501,40 @@ input[type="checkbox"] {
   text-transform: uppercase;
 }
 
+/* ── Explode layer labels ── */
+#explode-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  display: none;
+}
+.explode-label {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+.explode-label-line {
+  width: 24px;
+  height: 1px;
+  background: rgba(255,255,255,0.35);
+  flex-shrink: 0;
+}
+.explode-label-text {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: rgba(255,255,255,0.7);
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  background: rgba(20,20,20,0.75);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 3px;
+  backdrop-filter: blur(4px);
+}
+
 /* ── FPS Counter ── */
 #fps-display {
   position: absolute;
@@ -1060,6 +1094,7 @@ input[type="checkbox"] {
         <button class="btn btn-sm active" id="vm-single" data-viewmode="single" aria-pressed="true">Single</button>
         <button class="btn btn-sm" id="vm-flatlay" data-viewmode="flatlay" aria-pressed="false">Flat Lay</button>
         <button class="btn btn-sm" id="vm-iso-flatlay" data-viewmode="iso-flatlay" aria-pressed="false">Iso Grid</button>
+        <button class="btn btn-sm" id="vm-exploded" data-viewmode="exploded" aria-pressed="false" title="Exploded view (E)">Exploded</button>
       </div>
 
       <div class="toolbar-divider"></div>
@@ -1099,6 +1134,7 @@ input[type="checkbox"] {
     <div id="viewport">
       <canvas id="three-canvas" tabindex="0" aria-label="3D viewport — use mouse to orbit, scroll to zoom"></canvas>
       <div id="fps-display">-- fps</div>
+      <div id="explode-labels" aria-hidden="true"></div>
     </div>
   </main>
 
@@ -1237,6 +1273,7 @@ const state = {
   },
 
   // View state
+  exploded: false,
   view: { mode: 'single' },  // 'single' | 'flatlay' | 'iso-flatlay'
 
   // Flat lay config
@@ -1493,30 +1530,236 @@ function buildSilhouette(w, h, tl, tr, bl, br) {
   return s;
 }
 
-// Update Y positions of tile meshes and face planes based on explodeProgress.
-function updateExplodedPositions() {
-  const totalD = state.layers.reduce((sum, l) => sum + l.thickness, 0);
+// ─────────────────────────────────────────────────────────────
+// EXPLODED VIEW SYSTEM (Phase 8)
+// Animated layer separation with shadow discs, floating HTML labels,
+// and smooth easeOutCubic camera reframing.
+// ─────────────────────────────────────────────────────────────
+
+let shadowDiscMeshes = [];
+let shadowDiscGeo    = null;
+let explodeAnimRaf   = null; // handle for current animation rAF
+
+// Stacked Y position of each layer mesh (bottom-edge world Y).
+function computeStackedPositions() {
+  const totalD = state.layers.reduce((s, l) => s + l.thickness, 0);
   let yAcc = -totalD / 2;
-  tileMeshes.forEach((mesh, i) => {
-    mesh.position.y = yAcc * UNIT + i * EXPLODE_GAP * explodeProgress;
-    yAcc += state.layers[i].thickness;
+  return state.layers.map(layer => {
+    const y = yAcc * UNIT;
+    yAcc += layer.thickness;
+    return y;
   });
-  // Face plane follows the cap layer (last mesh)
+}
+
+// Exploded Y positions: each layer rises by (index × spacing) above stacked.
+// spacing = tile.depth × 0.8 so gaps are visually generous.
+function computeExplodedPositions() {
+  const spacing = state.tile.depth * 0.8 * UNIT;
+  return computeStackedPositions().map((y, i) => y + i * spacing);
+}
+
+// Create one shadow disc per layer, added to tileGroup, opacity 0 initially.
+function buildShadowDiscs() {
+  shadowDiscMeshes.forEach(d => { tileGroup.remove(d); d.material.dispose(); });
+  shadowDiscMeshes = [];
+  if (shadowDiscGeo) { shadowDiscGeo.dispose(); shadowDiscGeo = null; }
+
+  const { width: W, height: H } = state.tile;
+  const radius = Math.max(W, H) / 2 * 1.1 * UNIT;
+  shadowDiscGeo = new THREE.CircleGeometry(radius, 32);
+
+  tileMeshes.forEach(() => {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: 5,
+      polygonOffsetUnits: 5,
+    });
+    const disc = new THREE.Mesh(shadowDiscGeo, mat);
+    disc.rotation.x = -Math.PI / 2;
+    disc.visible = false;
+    tileGroup.add(disc);
+    shadowDiscMeshes.push(disc);
+  });
+}
+
+// Sync shadow disc positions and opacity to current explodeProgress.
+function updateShadowDiscPositions() {
+  const stacked  = computeStackedPositions();
+  const exploded = computeExplodedPositions();
+  shadowDiscMeshes.forEach((disc, i) => {
+    if (i >= tileMeshes.length) return;
+    const layerY = stacked[i] + (exploded[i] - stacked[i]) * explodeProgress;
+    disc.position.y   = layerY - 2 * UNIT; // 2 mm below layer bottom
+    disc.material.opacity = 0.15 * explodeProgress;
+    disc.visible      = explodeProgress > 0.01;
+  });
+}
+
+// Rebuild HTML label elements to match current layer count, then position
+// them in screen space using camera.project(). Called every frame when visible.
+function updateLayerLabels() {
+  const container = document.getElementById('explode-labels');
+  if (!container) return;
+
+  if (explodeProgress < 0.01) {
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = '';
+  container.style.opacity  = Math.min(1, explodeProgress * 2).toFixed(3);
+
+  // Ensure we have enough label divs
+  while (container.children.length < tileMeshes.length) {
+    const el = document.createElement('div');
+    el.className = 'explode-label';
+    el.innerHTML  = '<div class="explode-label-line"></div>'
+                  + '<div class="explode-label-text"></div>';
+    container.appendChild(el);
+  }
+  // Hide surplus divs
+  Array.from(container.children).forEach((el, i) => {
+    el.style.display = i < tileMeshes.length ? '' : 'none';
+  });
+
+  const vp      = document.getElementById('viewport');
+  const vpW     = vp ? vp.clientWidth  : window.innerWidth;
+  const vpH     = vp ? vp.clientHeight : window.innerHeight;
+
+  tileMeshes.forEach((mesh, i) => {
+    const el      = container.children[i];
+    if (!el) return;
+    const layer   = state.layers[i];
+    const matDef  = MATERIALS[layer.material];
+    const matLbl  = matDef ? matDef.label : layer.material;
+    const finLbl  = (layer.finish || 'gloss').charAt(0).toUpperCase()
+                  + (layer.finish || 'gloss').slice(1);
+    const textEl  = el.querySelector('.explode-label-text');
+    if (textEl) textEl.textContent =
+      `${layer.name} · ${matLbl} ${finLbl} · ${layer.thickness}mm`;
+
+    // Project right-centre of this layer into screen space
+    const worldPos = new THREE.Vector3(
+      state.tile.width / 2 * UNIT,
+      mesh.position.y + layer.thickness / 2 * UNIT,
+      0
+    );
+    worldPos.project(camera);
+    const sx = (worldPos.x + 1) / 2 * vpW;
+    const sy = (1 - (worldPos.y + 1) / 2) * vpH;
+    el.style.left = (sx + 4) + 'px';
+    el.style.top  = sy + 'px';
+  });
+}
+
+// Update all positions driven by explodeProgress (face planes + discs).
+function updateExplodedPositions() {
+  const stacked  = computeStackedPositions();
+  const exploded = computeExplodedPositions();
+  tileMeshes.forEach((mesh, i) => {
+    mesh.position.y = stacked[i] + (exploded[i] - stacked[i]) * explodeProgress;
+  });
+  updateShadowDiscPositions();
   if (facePlaneA && tileMeshes.length > 0) {
     const capMesh = tileMeshes[tileMeshes.length - 1];
-    const capThickness = state.layers[state.layers.length - 1].thickness;
-    facePlaneA.position.y = capMesh.position.y + capThickness * UNIT + 0.3;
+    facePlaneA.position.y = capMesh.position.y
+      + state.layers[state.layers.length - 1].thickness * UNIT + 0.3;
   }
   if (facePlaneB && tileMeshes.length > 0) {
-    const baseMesh = tileMeshes[0];
-    facePlaneB.position.y = baseMesh.position.y - 0.3;
+    facePlaneB.position.y = tileMeshes[0].position.y - 0.3;
   }
 }
 
+// Main animation driver.  Drives layers, shadow discs, labels, and camera
+// simultaneously using easeOutCubic over `duration` milliseconds.
+function animateExplode(toExploded, duration = 800) {
+  state.exploded  = toExploded;
+  tileIsExploded  = toExploded;
+
+  if (explodeAnimRaf) { cancelAnimationFrame(explodeAnimRaf); explodeAnimRaf = null; }
+
+  const start  = performance.now();
+  const fromY  = tileMeshes.map(m => m.position.y);
+  const toY    = toExploded ? computeExplodedPositions() : computeStackedPositions();
+
+  // Camera targets
+  const fromTarget = controls.target.clone();
+  const fromCamPos = camera.position.clone();
+  const { width: W, height: H, depth: D } = state.tile;
+  const maxDim = Math.max(W, H, D);
+  const baseDist = maxDim * 3;
+
+  let toTarget, toCamPos;
+  if (toExploded) {
+    const expY   = computeExplodedPositions();
+    const topY   = expY[expY.length - 1]
+                 + state.layers[state.layers.length - 1].thickness * UNIT;
+    const midY   = (topY + expY[0]) / 2;
+    toTarget  = new THREE.Vector3(0, midY, 0);
+    toCamPos  = new THREE.Vector3(
+      baseDist * 0.7 * 1.3,
+      midY + baseDist * 1.2,
+      baseDist * 0.8 * 1.3
+    );
+  } else {
+    toTarget  = new THREE.Vector3(0, 0, 0);
+    toCamPos  = new THREE.Vector3(baseDist * 0.7, baseDist * 0.8, baseDist * 0.8);
+  }
+
+  // Sync view-mode button active states
+  document.querySelectorAll('[data-viewmode]').forEach(btn => {
+    const active = toExploded
+      ? btn.dataset.viewmode === 'exploded'
+      : btn.dataset.viewmode === (state.view.mode || 'single');
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active);
+  });
+
+  function tick(now) {
+    const t    = Math.min((now - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - t, 3); // easeOutCubic
+    explodeProgress = toExploded ? ease : (1 - ease);
+
+    tileMeshes.forEach((mesh, i) => {
+      mesh.position.y = fromY[i] + (toY[i] - fromY[i]) * ease;
+    });
+    updateShadowDiscPositions();
+    if (facePlaneA && tileMeshes.length > 0) {
+      facePlaneA.position.y = tileMeshes[tileMeshes.length - 1].position.y
+        + state.layers[state.layers.length - 1].thickness * UNIT + 0.3;
+    }
+    if (facePlaneB && tileMeshes.length > 0) {
+      facePlaneB.position.y = tileMeshes[0].position.y - 0.3;
+    }
+    controls.target.lerpVectors(fromTarget, toTarget, ease);
+    camera.position.lerpVectors(fromCamPos, toCamPos, ease);
+    controls.update();
+    updateLayerLabels();
+
+    if (t < 1) {
+      explodeAnimRaf = requestAnimationFrame(tick);
+    } else {
+      explodeAnimRaf = null;
+      explodeProgress = toExploded ? 1 : 0;
+      explodeTargetProgress = explodeProgress;
+      updateExplodedPositions();
+      updateLayerLabels();
+      controls.update();
+    }
+  }
+  explodeAnimRaf = requestAnimationFrame(tick);
+}
+
 function buildTile(exploded = false) {
-  tileIsExploded = exploded;
-  explodeTargetProgress = exploded ? 1 : 0;
-  explodeProgress = explodeTargetProgress; // snap immediately on explicit rebuild
+  // Cancel any in-progress explode animation before rebuilding geometry
+  if (explodeAnimRaf) { cancelAnimationFrame(explodeAnimRaf); explodeAnimRaf = null; }
+  tileIsExploded   = false;
+  state.exploded   = false;
+  explodeProgress  = 0;
+  explodeTargetProgress = 0;
 
   // Dispose and remove all existing layer meshes
   tileMeshes.forEach(m => {
@@ -1587,13 +1830,14 @@ function buildTile(exploded = false) {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.name = layer.name;
-    mesh.position.y = yAcc * UNIT + i * EXPLODE_GAP * explodeProgress;
+    mesh.position.y = yAcc * UNIT; // explode animation applied separately
 
     tileGroup.add(mesh);
     tileMeshes.push(mesh);
     yAcc += layer.thickness;
   });
 
+  buildShadowDiscs();
   applyDesignTexture();
   updateStackDiagram();
 }
@@ -1809,20 +2053,20 @@ function setCameraPreset(preset) {
     camera.lookAt(0, 0, 0);
     controls.target.set(0, 0, 0);
   } else if (preset === 'exploded') {
-    // Animate explode — just set the target, animate() will lerp positions
-    tileIsExploded = true;
-    explodeTargetProgress = 1;
-    const dist = maxDim * 3;
-    camera.position.set(dist * 0.7, dist * 1.5, dist * 0.8);
-    camera.lookAt(0, 0, 0);
-    controls.target.set(0, 0, 0);
-    controls.update();
+    // Ensure single-tile view, then animate explode
+    if (state.view.mode !== 'single') {
+      state.view.mode = 'single';
+      tileGroup.visible = true;
+      flatLayGroup.visible = false;
+      flatLaySys.clear();
+      buildTile(false);
+    }
+    animateExplode(!state.exploded);
     return;
   }
 
-  if (tileIsExploded) {
-    tileIsExploded = false;
-    explodeTargetProgress = 0;
+  if (state.exploded) {
+    animateExplode(false, 400);
   }
   controls.update();
 }
@@ -2541,24 +2785,48 @@ const flatLaySys = {
 // Updates camera accordingly.
 // ─────────────────────────────────────────────────────────────
 function setViewMode(mode) {
+  // ── Exploded toggle (lives in the view-mode row but isn't a layout mode) ──
+  if (mode === 'exploded') {
+    // Auto-switch to single first if in flat lay
+    if (state.view.mode !== 'single') {
+      setViewMode('single');
+    }
+    animateExplode(!state.exploded);
+    return;
+  }
+
+  // ── Collapse exploded before entering flat-lay modes ──
+  if (state.exploded && mode !== 'single') {
+    state.exploded = false;
+    tileIsExploded = false;
+    explodeProgress = 0;
+    explodeTargetProgress = 0;
+    updateExplodedPositions();
+    updateLayerLabels();
+  }
+
   state.view.mode = mode;
 
-  // Update toolbar buttons
+  // Update toolbar buttons (exclude 'exploded' from view-mode highlighting
+  // when not in exploded state)
   document.querySelectorAll('[data-viewmode]').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.viewmode === mode);
-    btn.setAttribute('aria-pressed', btn.dataset.viewmode === mode);
+    const active = state.exploded
+      ? btn.dataset.viewmode === 'exploded'
+      : btn.dataset.viewmode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active);
   });
 
   // Show/hide flat lay options
   const flOpts = document.getElementById('flatlay-opts');
-  if (flOpts) flOpts.style.display = mode !== 'single' ? 'flex' : 'none';
+  if (flOpts) flOpts.style.display = (mode !== 'single') ? 'flex' : 'none';
 
   if (mode === 'single') {
     tileGroup.visible = true;
     flatLayGroup.visible = false;
     flatLaySys.clear();
-    buildTile(tileIsExploded);
-    setCameraPreset('iso');
+    buildTile(false);
+    if (!state.exploded) setCameraPreset('iso');
     shadowPlane.visible = true;
   } else {
     tileGroup.visible = false;
@@ -2659,12 +2927,27 @@ const exportSys = {
     showToast('PNG exported!');
   },
 
-  // GLB Export
-  // Exports the tile group with all four layer meshes
+  // GLB Export — always exports STACKED geometry (exploded is a visualisation only)
   exportGLB() {
-    showToast('Exporting GLB...');
+    const wasExploded = state.exploded;
+    const savedProgress = explodeProgress;
+
+    // Snap to stacked before export
+    if (wasExploded) {
+      explodeProgress = 0;
+      updateExplodedPositions();
+    }
+
+    showToast('Exporting GLB…');
     const exporter = new GLTFExporter();
     const exportTarget = state.view.mode === 'single' ? tileGroup : flatLayGroup;
+
+    const restore = () => {
+      if (wasExploded) {
+        explodeProgress = savedProgress;
+        updateExplodedPositions();
+      }
+    };
 
     exporter.parse(
       exportTarget,
@@ -2674,9 +2957,14 @@ const exportSys = {
         link.download = 'otto-tile.glb';
         link.href = URL.createObjectURL(blob);
         link.click();
-        showToast('GLB exported!');
+        showToast('GLB exported (stacked)');
+        restore();
       },
-      (err) => { console.error('GLB export error:', err); showToast('GLB export failed'); },
+      (err) => {
+        console.error('GLB export error:', err);
+        showToast('GLB export failed');
+        restore();
+      },
       { binary: true, trs: false, onlyVisible: true, embedImages: true }
     );
   },
@@ -3039,7 +3327,7 @@ function buildLayerUI() {
       reader.onload = ev => {
         state.layers[i].textureSrc = ev.target.result;
         state.layers[i].textureEnabled = true;
-        buildTile(tileIsExploded);
+        buildTile(false);
         buildLayerUI();
       };
       reader.readAsDataURL(file);
@@ -3062,7 +3350,7 @@ function buildLayerUI() {
         color: '#888888', visible: true, expanded: false
       });
       validateThicknesses();
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
       buildLayerUI();
     });
@@ -3079,7 +3367,7 @@ function buildLayerUI() {
       state.layers[i].thickness = parseFloat(el.value) || 0.5;
       document.getElementById(`badge-${i}`).textContent = state.layers[i].thickness + 'mm';
       validateThicknesses();
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
     }
 
@@ -3087,7 +3375,7 @@ function buildLayerUI() {
       const i = parseInt(el.dataset.layerColor);
       state.layers[i].color = el.value;
       document.getElementById(`swatch-${i}`).style.background = el.value;
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateStackDiagram();
       updateFlatLay();
       if (i === state.layers.length - 1 || i === 0) designSys.draw();
@@ -3098,7 +3386,7 @@ function buildLayerUI() {
       state.layers[i].opacity = parseInt(el.value);
       const span = document.getElementById(`opacity-val-${i}`);
       if (span) span.textContent = el.value + '%';
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
     }
   });
@@ -3115,7 +3403,7 @@ function buildLayerUI() {
       matBtn.closest('div').querySelectorAll('.mat-type-btn').forEach(b =>
         b.classList.toggle('active', b.dataset.matKey === matBtn.dataset.matKey)
       );
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
       return;
     }
@@ -3129,7 +3417,7 @@ function buildLayerUI() {
       finBtn.closest('div').querySelectorAll('.mat-finish-btn').forEach(b =>
         b.classList.toggle('active', b.dataset.finishVal === finBtn.dataset.finishVal)
       );
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
       return;
     }
@@ -3143,7 +3431,7 @@ function buildLayerUI() {
       if (i === 0 || i === state.layers.length - 1) return; // locked
       state.layers.splice(i, 1);
       validateThicknesses();
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
       buildLayerUI();
       return;
@@ -3165,7 +3453,7 @@ function buildLayerUI() {
       const i = parseInt(texToggleBtn.dataset.layerTexToggle);
       state.layers[i].textureEnabled = !state.layers[i].textureEnabled;
       texToggleBtn.textContent = state.layers[i].textureEnabled ? '◉' : '○';
-      buildTile(tileIsExploded);
+      buildTile(false);
       return;
     }
 
@@ -3176,7 +3464,7 @@ function buildLayerUI() {
       const i = parseInt(texClearBtn.dataset.layerTexClear);
       state.layers[i].textureSrc = null;
       state.layers[i].textureEnabled = true;
-      buildTile(tileIsExploded);
+      buildTile(false);
       buildLayerUI();
       return;
     }
@@ -3305,7 +3593,7 @@ function initUI() {
       state.tile[key] = parseFloat(inp.value) || 0;
       updateScaleRef();
       validateThicknesses();
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
       if (id === 'dim-width' || id === 'dim-height') {
         designSys.canvas.width  = state.tile.width  * designSys.scale;
@@ -3327,7 +3615,7 @@ function initUI() {
       state.tile[key] = parseFloat(val) || 0;
       numEl.value   = fmt(val);
       rangeEl.value = val;
-      buildTile(tileIsExploded);
+      buildTile(false);
       updateFlatLay();
     };
     numEl.addEventListener('input',   () => apply(numEl.value));
@@ -3342,7 +3630,7 @@ function initUI() {
     document.getElementById('dim-bevel-radius-range').value = '2';
     document.getElementById('dim-bevel-segs').value         = '8';
     document.getElementById('dim-bevel-segs-range').value   = '8';
-    buildTile(tileIsExploded);
+    buildTile(false);
     updateFlatLay();
   });
 
@@ -3366,7 +3654,7 @@ function initUI() {
     } else {
       state.tile[key] = v;
     }
-    buildTile(tileIsExploded);
+    buildTile(false);
     updateFlatLay();
   };
   cornerDefs.forEach(([numId, rangeId, key]) => {
@@ -3379,9 +3667,19 @@ function initUI() {
     state.tile.cornerLinked = e.target.checked;
   });
 
-  // View mode buttons
+  // View mode buttons (includes Exploded which is handled inside setViewMode)
   document.querySelectorAll('[data-viewmode]').forEach(btn => {
     btn.addEventListener('click', () => setViewMode(btn.dataset.viewmode));
+  });
+
+  // Keyboard shortcut: E toggles exploded view
+  window.addEventListener('keydown', e => {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'e' || e.key === 'E') {
+      e.preventDefault();
+      setViewMode('exploded');
+    }
   });
 
   // Camera preset buttons
@@ -3394,7 +3692,7 @@ function initUI() {
 
   // Refresh render
   document.getElementById('refresh-render-btn')?.addEventListener('click', () => {
-    buildTile(tileIsExploded);
+    buildTile(false);
     setupEnvironment();
     updateLights();
     if (designSys.canvas) designSys.applyToTile();
@@ -3608,14 +3906,8 @@ let fps = 0;
 function animate() {
   requestAnimationFrame(animate);
 
-  // Animate exploded view — lerp explodeProgress toward target
-  if (Math.abs(explodeProgress - explodeTargetProgress) > 0.001) {
-    explodeProgress += (explodeTargetProgress - explodeProgress) * 0.1;
-    if (Math.abs(explodeProgress - explodeTargetProgress) < 0.001) {
-      explodeProgress = explodeTargetProgress;
-    }
-    updateExplodedPositions();
-  }
+  // Update floating labels every frame (they depend on live camera matrix)
+  if (explodeProgress > 0.01) updateLayerLabels();
 
   controls.update();
   renderer.render(scene, camera);
