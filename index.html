@@ -1465,12 +1465,13 @@ function makeMaterial(materialKey, finish, color, opacity = 100, layer = null) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TILE GEOMETRY BUILDER — Clipping Plane Architecture
+// TILE GEOMETRY BUILDER — Shared Silhouette Architecture
 //
-// Each layer is a full copy of the shared RoundedBoxGeometry,
-// clipped to its Y band by two THREE.Plane clipping planes.
-// This gives pixel-perfect layer boundaries with zero triangle
-// seam artifacts. renderer.localClippingEnabled must be true.
+// All layers share one buildSilhouette() 2D shape (XY footprint).
+// Each layer is an ExtrudeGeometry of that shape to its own depth.
+// Cap (top) layer: bevel on the top face → glassy lozenge curve.
+// Base (bottom) layer: bevel on the bottom face → floor-contact curve.
+// Body / Inlay: bevelEnabled false → straight sides, zero muffin effect.
 // ─────────────────────────────────────────────────────────────
 const UNIT = 1;
 let tileMeshes = [];      // one mesh per layer
@@ -1795,20 +1796,42 @@ function buildTile(exploded = false) {
 
   state.layers.forEach((layer, i) => {
     const th = layer.thickness * UNIT;
-    const isTop = i === lastIdx;
+    const isTop    = i === lastIdx;
+    const isBottom = i === 0;
 
-    // Cap layer gets the edge bevel for the glassy-lozenge look
+    // Bevel guard: size must never exceed any corner radius or ~45% of layer thickness.
+    // Exceeding a corner radius produces degenerate geometry in Three.js.
+    const safeBevel = Math.min(
+      bevel,
+      cornerTL, cornerTR, cornerBL, cornerBR,
+      th * 0.45
+    );
+
+    // Cap gets bevel on top face; Base gets bevel on bottom face (see flip below).
+    // Body and Inlay have no bevel — perfectly straight sides, no muffin effect.
+    const needsBevel = (isTop || isBottom) && safeBevel > 0;
     const extrudeSettings = {
       depth: th,
-      bevelEnabled: isTop && bevel > 0,
-      bevelSize: isTop ? bevel : 0,
-      bevelThickness: isTop ? bevel : 0,
-      bevelSegments: isTop && bevel > 0 ? bevelSegs : 0,
+      bevelEnabled: needsBevel,
+      bevelSize:      needsBevel ? safeBevel : 0,
+      bevelThickness: needsBevel ? safeBevel : 0,
+      bevelSegments:  needsBevel ? bevelSegs : 0,
       curveSegments: 32,
     };
 
     const geo = new THREE.ExtrudeGeometry(silhouette, extrudeSettings);
     geo.applyMatrix4(rotMatrix);
+
+    // For the base layer: the bevel sits at the top of the extrusion (local Y=+th).
+    // Flip it to the bottom face by: (1) makeRotationX(π) → bevel moves to Y=-th,
+    // then (2) translate +th → bevel at Y=0.  mesh.position.y stays unchanged.
+    // makeRotationX(π) has det=+1 so winding order and normals are preserved.
+    if (isBottom && needsBevel) {
+      const flipAndShift = new THREE.Matrix4()
+        .makeTranslation(0, th, 0)
+        .multiply(new THREE.Matrix4().makeRotationX(Math.PI));
+      geo.applyMatrix4(flipAndShift);
+    }
 
     const mat = makeMaterial(
       layer.material,
@@ -2717,19 +2740,35 @@ const flatLaySys = {
 
     layers.forEach((layer, li) => {
       const th = layer.thickness * UNIT;
-      const isTop = li === lastIdx;
-      const yMin = yAcc * UNIT;
+      const isTop    = li === lastIdx;
+      const isBottom = li === 0;
 
+      // Bevel guard: size must never exceed any corner radius or ~45% of layer thickness
+      const safeBevel = Math.min(
+        bevel,
+        cornerTL, cornerTR, cornerBL, cornerBR,
+        th * 0.45
+      );
+
+      const needsBevel = (isTop || isBottom) && safeBevel > 0;
       const extrudeSettings = {
         depth: th,
-        bevelEnabled: isTop && bevel > 0,
-        bevelSize: isTop ? bevel : 0,
-        bevelThickness: isTop ? bevel : 0,
-        bevelSegments: isTop && bevel > 0 ? bevelSegs : 0,
+        bevelEnabled: needsBevel,
+        bevelSize:      needsBevel ? safeBevel : 0,
+        bevelThickness: needsBevel ? safeBevel : 0,
+        bevelSegments:  needsBevel ? bevelSegs : 0,
         curveSegments: 32,
       };
       const geo = new THREE.ExtrudeGeometry(silhouette, extrudeSettings);
       geo.applyMatrix4(rotMatrix);
+
+      // For the base layer: flip bevel to bottom face (see buildTile comments)
+      if (isBottom && needsBevel) {
+        const flipAndShift = new THREE.Matrix4()
+          .makeTranslation(0, th, 0)
+          .multiply(new THREE.Matrix4().makeRotationX(Math.PI));
+        geo.applyMatrix4(flipAndShift);
+      }
 
       const opacity = isTop ? (layer.opacity ?? 100) : 100;
       const mat = makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity, layer);
@@ -2741,7 +2780,7 @@ const flatLaySys = {
       const iMesh = new THREE.InstancedMesh(geo, mat, count);
       iMesh.castShadow = false;
       iMesh.receiveShadow = true;
-      iMesh.position.y = yMin; // layer Y offset applied to the whole InstancedMesh
+      iMesh.position.y = yAcc * UNIT; // layer Y offset applied to the whole InstancedMesh
 
       let idx = 0;
       for (let row = 0; row < rows && idx < count; row++) {
