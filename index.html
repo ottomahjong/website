@@ -2352,7 +2352,12 @@ const designSys = {
 
       const planeMat = new THREE.MeshBasicMaterial({
         transparent: true,
+        // alphaTest 0.5 clips semi-transparent alpha-blended edge pixels that
+        // would otherwise render as white or coloured stripes on the tile face.
         alphaTest: 0.5,
+        // premultipliedAlpha false ensures source alpha is not pre-multiplied,
+        // preventing white fringe artifacts at alpha channel boundaries.
+        premultipliedAlpha: false,
         depthWrite: false,
         depthTest: false,
         polygonOffset: true,
