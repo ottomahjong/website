@@ -1292,7 +1292,17 @@ const state = {
 // ─────────────────────────────────────────────────────────────
 const MATERIALS = {
   'resin':    { label: 'Resin',    matte: { roughness: 0.85, metalness: 0.0 },                                              gloss: { roughness: 0.05, metalness: 0.0, clearcoat: 1.0, clearcoatRoughness: 0.03 } },
-  'acrylic':  { label: 'Acrylic',  matte: { roughness: 0.4,  metalness: 0.0, transmission: 0.6,  thickness: 3, ior: 1.49, transparent: true }, gloss: { roughness: 0.0,  metalness: 0.0, transmission: 0.92, thickness: 3, ior: 1.49, transparent: true } },
+  // Acrylic: physically based transmissive clear resin.
+  // transmission < 1.0 ensures the surface is always visibly present even
+  // against a transparent background — the non-transmitted fraction contributes
+  // to specular reflections and Fresnel edge highlights (IOR 1.49 ≈ real acrylic).
+  // attenuationColor/Distance give subtle depth-based tinting so the material
+  // reads as a solid volume rather than an invisible ghost surface.
+  // envMapIntensity is boosted by makeMaterial() for transmissive materials.
+  'acrylic':  { label: 'Acrylic',
+    matte: { roughness: 0.35, metalness: 0.0, transmission: 0.50, thickness: 3, ior: 1.49, transparent: true, attenuationColor: '#eef4ff', attenuationDistance: 6,  specularIntensity: 0.9 },
+    gloss: { roughness: 0.05, metalness: 0.0, transmission: 0.72, thickness: 3, ior: 1.49, transparent: true, attenuationColor: '#f0f6ff', attenuationDistance: 10, specularIntensity: 1.0 },
+  },
   'metallic': { label: 'Metallic', matte: { roughness: 0.6,  metalness: 1.0 },                                              gloss: { roughness: 0.05, metalness: 1.0, envMapIntensity: 2.0 } },
   'wood':     { label: 'Wood',     matte: { roughness: 0.9,  metalness: 0.0 },                                              gloss: { roughness: 0.3,  metalness: 0.0, clearcoat: 0.5, clearcoatRoughness: 0.3 } },
 };
@@ -1431,14 +1441,25 @@ function makeMaterial(materialKey, finish, color, opacity = 100, layer = null) {
 
   params.color = new THREE.Color(color);
 
-  // For transmissive materials, transmission controls transparency —
-  // skip alpha-blend opacity to avoid conflicting with the render path.
-  if (opacity < 100 && !params.transmission) {
-    params.transparent = true;
-    params.opacity = opacity / 100;
+  if (opacity < 100) {
+    if (params.transmission) {
+      // Scale transmission by user's opacity so the material gains surface
+      // presence as opacity decreases (e.g. 85% opacity → 15% less see-through).
+      // This also prevents the material from becoming an invisible ghost at
+      // high transmission values against a transparent background.
+      params.transmission = params.transmission * (opacity / 100);
+      params.transparent  = true;
+    } else {
+      params.transparent = true;
+      params.opacity     = opacity / 100;
+    }
   }
 
   const mat = new THREE.MeshPhysicalMaterial(params);
+
+  // Boost environment map reflections for transmissive materials so Fresnel
+  // highlights and edge glints give the clear material a visible physical presence.
+  if (mat.transmission > 0) mat.envMapIntensity = 2.0;
 
   // Apply per-layer surface texture if present and enabled
   if (layer && layer.textureSrc && layer.textureEnabled) {
@@ -1471,22 +1492,27 @@ function makeMaterial(materialKey, finish, color, opacity = 100, layer = null) {
 // cuboid) with embedded internal material strata.
 //
 // TWO-OBJECT MODEL:
-//   envelopeMesh — one full-depth ExtrudeGeometry with bevelEnabled.
-//                  ExtrudeGeometry bevels BOTH the top face (z=depth)
-//                  AND the bottom face (z=0) symmetrically, giving the
-//                  outer shell its lozenge/pillow profile on both ends.
+//   envelopeMesh — one full-depth ExtrudeGeometry for the outer shell.
+//                  SUBTRACTIVE BEVEL: the silhouette passed to
+//                  ExtrudeGeometry is pre-inset by bevelSize on each
+//                  side, so the bevel ring (the widest point of the
+//                  three.js bevel shoulder) lands exactly at the
+//                  declared W × H — material is removed from the block,
+//                  not added outside it. Flat faces are (W-2b)×(H-2b).
 //                  Material array: [capMat, baseMat, invisibleSideMat]
-//                  → top and bottom faces carry material color; side wall
-//                    is invisible (opacity 0, depthWrite false).
+//                  → top/bottom faces carry material color; side wall is
+//                    invisible (opacity 0, depthWrite false) so band
+//                    meshes show through.
 //
-//   tileMeshes[] — N band meshes (one per layer), each using the same
-//                  silhouette extruded to that layer's thickness. Two
-//                  world-space clipping planes restrict rendering to the
-//                  band's Y range so only the side-wall ring is visible.
-//                  This provides the side-wall material color banding.
+//   tileMeshes[] — N band meshes (one per layer), using the FULL W×H
+//                  silhouette (no inset, no bevel) extruded to the
+//                  layer's thickness. Two world-space clipping planes
+//                  restrict rendering to the band's Y range so only the
+//                  side-wall ring is visible. Flush with the envelope's
+//                  straight-wall zone (which is also W×H).
 //
-// EXPLODED VIEW: envelopeMesh hidden, band meshes switch to beveled
-// geometry with no clip planes → each slab reads as a standalone piece.
+// EXPLODED VIEW: envelopeMesh hidden; band meshes swap to subtractive-
+// beveled standalone slabs (same inset logic applied per band).
 //
 // renderer.localClippingEnabled = true is required (set at init).
 // ─────────────────────────────────────────────────────────────
@@ -1883,9 +1909,27 @@ function buildTile() {
   //   group 0 → front cap (z=depth = world Y top) → Cap material
   //   group 1 → back  cap (z=0    = world Y bot) → Base material
   //   group 2 → side wall                         → invisible (transparent)
+  //
+  // SUBTRACTIVE BEVEL: ExtrudeGeometry.bevelSize EXPANDS the input shape
+  // OUTWARD by bevelSize at the bevel shoulder.  To keep the tile within
+  // its declared W × H × totalD bounding box (a manufactured constraint),
+  // we pre-inset the silhouette by envBevel before extrusion.  The bevel
+  // expansion then lands exactly at W × H — rounding occurs by removing
+  // material from the existing block, not by adding to the outside.
+  //   flat face at top/bottom: (W − 2b) × (H − 2b)  ← inset, as machined
+  //   side wall (straight zone): W × H               ← original dimensions
+  //   bevel transition: curves from W×H to (W-2b)×(H-2b) at each face edge
   // ─────────────────────────────────────────────────────────────────────────
-  const envBevel = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR);
-  const envGeo = new THREE.ExtrudeGeometry(silhouette, {
+  const envBevel = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR,
+                            (W_mm - 0.2) / 2, (H_mm - 0.2) / 2);
+  const envSilhouette = envBevel > 0
+    ? buildSilhouette(
+        W_mm - 2 * envBevel, H_mm - 2 * envBevel,
+        Math.max(0, cornerTL - envBevel), Math.max(0, cornerTR - envBevel),
+        Math.max(0, cornerBL - envBevel), Math.max(0, cornerBR - envBevel)
+      )
+    : silhouette;
+  const envGeo = new THREE.ExtrudeGeometry(envSilhouette, {
     depth:          totalD,
     bevelEnabled:   envBevel > 0,
     bevelSize:      envBevel,
@@ -1902,6 +1946,8 @@ function buildTile() {
     capLayer.material, capLayer.finish || 'gloss',
     capLayer.color, capLayer.opacity ?? 100, capLayer
   );
+  // Set thickness to actual cap depth for physically correct attenuation
+  if (envTopMat.transmission > 0) envTopMat.thickness = Math.max(1, capLayer.thickness);
   const envBotMat = makeMaterial(
     baseLayer.material, baseLayer.finish || 'gloss',
     baseLayer.color, 100, baseLayer
@@ -1947,9 +1993,19 @@ function buildTile() {
     bandGeosNormal.push(normalGeo);
 
     // ── Exploded-view geometry: bevel on outermost layers (standalone slabs)
-    const safeBevelBand = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR, th * 0.45);
+    // Pre-inset the silhouette by safeBevelBand so the bevel ring lands at
+    // W×H (subtractive bevel, consistent with the envelope in normal view).
+    const safeBevelBand = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR,
+                                   th * 0.45, (W_mm - 0.2) / 2, (H_mm - 0.2) / 2);
     const needsBandBevel = (isTop || isBottom) && safeBevelBand > 0;
-    const explodedGeo = new THREE.ExtrudeGeometry(silhouette, {
+    const bandInsetSil = needsBandBevel
+      ? buildSilhouette(
+          W_mm - 2 * safeBevelBand, H_mm - 2 * safeBevelBand,
+          Math.max(0, cornerTL - safeBevelBand), Math.max(0, cornerTR - safeBevelBand),
+          Math.max(0, cornerBL - safeBevelBand), Math.max(0, cornerBR - safeBevelBand)
+        )
+      : silhouette;
+    const explodedGeo = new THREE.ExtrudeGeometry(bandInsetSil, {
       depth:          th,
       bevelEnabled:   needsBandBevel,
       bevelSize:      needsBandBevel ? safeBevelBand : 0,
