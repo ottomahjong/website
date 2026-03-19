@@ -924,6 +924,36 @@ input[type="checkbox"] {
         <div class="field-row" style="justify-content:flex-end;">
           <button id="btn-reset-corners" style="font-size:0.75rem;padding:2px 8px;cursor:pointer;" aria-label="Reset bevel to defaults">Reset corners</button>
         </div>
+        <!-- Per-corner radii -->
+        <div style="font-size:0.7rem;font-weight:500;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-secondary);margin:8px 0 4px;">Corner Radii</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+          <input type="checkbox" id="corner-linked" checked title="Link all corners">
+          <label for="corner-linked" style="font-size:0.75rem;color:var(--text-secondary);cursor:pointer;">Link all</label>
+        </div>
+        <div class="field-row">
+          <label for="corner-tl" style="flex:0 0 72px;">Top-left</label>
+          <input type="range" id="corner-tl-range" min="0" max="20" step="0.1" value="3" style="flex:1;min-width:0;" aria-label="Top-left corner radius slider">
+          <input type="number" id="corner-tl" value="3" min="0" max="20" step="0.1" style="width:54px;" aria-label="Top-left radius mm">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+        </div>
+        <div class="field-row">
+          <label for="corner-tr" style="flex:0 0 72px;">Top-right</label>
+          <input type="range" id="corner-tr-range" min="0" max="20" step="0.1" value="3" style="flex:1;min-width:0;" aria-label="Top-right corner radius slider">
+          <input type="number" id="corner-tr" value="3" min="0" max="20" step="0.1" style="width:54px;" aria-label="Top-right radius mm">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+        </div>
+        <div class="field-row">
+          <label for="corner-bl" style="flex:0 0 72px;">Bot-left</label>
+          <input type="range" id="corner-bl-range" min="0" max="20" step="0.1" value="3" style="flex:1;min-width:0;" aria-label="Bottom-left corner radius slider">
+          <input type="number" id="corner-bl" value="3" min="0" max="20" step="0.1" style="width:54px;" aria-label="Bottom-left radius mm">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+        </div>
+        <div class="field-row">
+          <label for="corner-br" style="flex:0 0 72px;">Bot-right</label>
+          <input type="range" id="corner-br-range" min="0" max="20" step="0.1" value="3" style="flex:1;min-width:0;" aria-label="Bottom-right corner radius slider">
+          <input type="number" id="corner-br" value="3" min="0" max="20" step="0.1" style="width:54px;" aria-label="Bottom-right radius mm">
+          <span style="font-size:0.75rem;color:var(--text-secondary);">mm</span>
+        </div>
         <!-- Scale reference -->
         <div id="scale-ref">
           <div id="scale-rect"></div>
@@ -1165,7 +1195,7 @@ input[type="checkbox"] {
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+// RoundedBoxGeometry replaced by per-corner ExtrudeGeometry (buildSilhouette)
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 
@@ -1177,7 +1207,8 @@ import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 // ─────────────────────────────────────────────────────────────
 const state = {
   // Physical dimensions (millimeters)
-  tile: { width: 36, height: 47, depth: 22, bevelRadius: 2, bevelSegments: 8 },
+  tile: { width: 36, height: 47, depth: 22, bevelRadius: 2, bevelSegments: 8,
+          cornerTL: 3, cornerTR: 3, cornerBL: 3, cornerBR: 3, cornerLinked: true },
 
   // Layers: bottom to top, thicknesses sum to tile.depth.
   // material: key from MATERIALS ('resin'|'acrylic'|'metallic'|'wood')
@@ -1411,128 +1442,157 @@ let facePlaneA = null;  // decal plane: Face A texture on top of Cap
 let facePlaneB = null;  // decal plane: Face B texture on bottom of Base
 const EXPLODE_GAP = 8;
 
+// Animated explode state
+let explodeProgress = 0;      // 0 = collapsed, 1 = fully exploded
+let explodeTargetProgress = 0;
+
+// ─────────────────────────────────────────────────────────────
+// SILHOUETTE BUILDER
+// Returns a THREE.Shape (XY plane) with per-corner radii.
+// The shape is centered at the origin.
+// w = tile width (X), h = tile face height (Y before rotation).
+// tl/tr/bl/br = corner radii in mm (0 = sharp corner).
+// ─────────────────────────────────────────────────────────────
+function buildSilhouette(w, h, tl, tr, bl, br) {
+  const maxR = Math.min(w, h) / 2 - 0.01;
+  tl = Math.min(Math.max(0, tl || 0), maxR);
+  tr = Math.min(Math.max(0, tr || 0), maxR);
+  bl = Math.min(Math.max(0, bl || 0), maxR);
+  br = Math.min(Math.max(0, br || 0), maxR);
+
+  const hw = w / 2, hh = h / 2;
+  const s = new THREE.Shape();
+
+  // Start bottom-left, traverse clockwise
+  s.moveTo(bl > 0 ? -hw + bl : -hw, -hh);
+
+  // Bottom edge → bottom-right
+  if (br > 0) {
+    s.lineTo(hw - br, -hh);
+    s.absarc(hw - br, -hh + br, br, -Math.PI / 2, 0, false);
+  } else { s.lineTo(hw, -hh); }
+
+  // Right edge → top-right
+  if (tr > 0) {
+    s.lineTo(hw, hh - tr);
+    s.absarc(hw - tr, hh - tr, tr, 0, Math.PI / 2, false);
+  } else { s.lineTo(hw, hh); }
+
+  // Top edge → top-left
+  if (tl > 0) {
+    s.lineTo(-hw + tl, hh);
+    s.absarc(-hw + tl, hh - tl, tl, Math.PI / 2, Math.PI, false);
+  } else { s.lineTo(-hw, hh); }
+
+  // Left edge → bottom-left (close)
+  if (bl > 0) {
+    s.lineTo(-hw, -hh + bl);
+    s.absarc(-hw + bl, -hh + bl, bl, Math.PI, 3 * Math.PI / 2, false);
+  } else { s.lineTo(-hw, -hh); }
+
+  return s;
+}
+
+// Update Y positions of tile meshes and face planes based on explodeProgress.
+function updateExplodedPositions() {
+  const totalD = state.layers.reduce((sum, l) => sum + l.thickness, 0);
+  let yAcc = -totalD / 2;
+  tileMeshes.forEach((mesh, i) => {
+    mesh.position.y = yAcc * UNIT + i * EXPLODE_GAP * explodeProgress;
+    yAcc += state.layers[i].thickness;
+  });
+  // Face plane follows the cap layer (last mesh)
+  if (facePlaneA && tileMeshes.length > 0) {
+    const capMesh = tileMeshes[tileMeshes.length - 1];
+    const capThickness = state.layers[state.layers.length - 1].thickness;
+    facePlaneA.position.y = capMesh.position.y + capThickness * UNIT + 0.3;
+  }
+  if (facePlaneB && tileMeshes.length > 0) {
+    const baseMesh = tileMeshes[0];
+    facePlaneB.position.y = baseMesh.position.y - 0.3;
+  }
+}
+
 function buildTile(exploded = false) {
   tileIsExploded = exploded;
+  explodeTargetProgress = exploded ? 1 : 0;
+  explodeProgress = explodeTargetProgress; // snap immediately on explicit rebuild
 
   // Dispose and remove all existing layer meshes
   tileMeshes.forEach(m => {
     tileGroup.remove(m);
-    // Do NOT dispose geometry — it is shared across all layer meshes
+    if (m.geometry) m.geometry.dispose();
     if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
     else if (m.material) m.material.dispose();
   });
   tileMeshes = [];
 
+  // Dispose old decal planes
+  if (facePlaneA) { tileGroup.remove(facePlaneA); facePlaneA.geometry.dispose(); facePlaneA.material.dispose(); facePlaneA = null; }
+  if (facePlaneB) { tileGroup.remove(facePlaneB); facePlaneB.geometry.dispose(); facePlaneB.material.dispose(); facePlaneB = null; }
+
   validateThicknesses();
 
-  const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
-  const r = BR || 0;
-  const segs = Math.max(1, Math.round(BS || 8));
-  const W_mm = W * UNIT, D_mm = D * UNIT, H_mm = H * UNIT;
+  const { width: W, height: H, bevelRadius: BR, bevelSegments: BS,
+          cornerTL = 3, cornerTR = 3, cornerBL = 3, cornerBR = 3 } = state.tile;
+  const W_mm = W * UNIT, H_mm = H * UNIT;
+  const bevel = Math.max(0, BR || 0);
+  const bevelSegs = Math.max(1, Math.round(BS || 8));
 
-  // One shared geometry for the full tile shape.
-  // X = tile width, Y = tile depth (stacking axis), Z = tile height (face)
-  // RoundedBoxGeometry signature: (width, height, depth, segments, radius)
-  let sharedGeo;
-  if (r < 0.001) {
-    sharedGeo = new THREE.BoxGeometry(W_mm, D_mm, H_mm);
-  } else {
-    const clampedR = Math.min(r * UNIT, W_mm / 2 - 0.01, D_mm / 2 - 0.01, H_mm / 2 - 0.01);
-    sharedGeo = new RoundedBoxGeometry(W_mm, D_mm, H_mm, segs, clampedR);
-  }
+  // Build shared 2D silhouette — all layers use the same XY outline
+  const silhouette = buildSilhouette(W_mm, H_mm, cornerTL, cornerTR, cornerBL, cornerBR);
 
-  // Compute cumulative Y boundaries for each layer.
-  // Geometry is centered at Y=0, so bottom = -D/2, top = +D/2.
+  // Rotation matrix: extrusion (Z) → stacking (Y), shape Y → world -Z
+  // Tile face is XZ plane; extrusion axis maps to Y (stacking direction).
+  const rotMatrix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+
   const totalD = state.layers.reduce((s, l) => s + l.thickness, 0);
   let yAcc = -totalD / 2;
-  const bands = state.layers.map(layer => {
-    const yMin = yAcc * UNIT;
-    const yMax = (yAcc + layer.thickness) * UNIT;
-    yAcc += layer.thickness;
-    return { yMin, yMax };
-  });
+  const lastIdx = state.layers.length - 1;
 
   state.layers.forEach((layer, i) => {
-    const { yMin, yMax } = bands[i];
+    const th = layer.thickness * UNIT;
+    const isTop = i === lastIdx;
+
+    // Cap layer gets the edge bevel for the glassy-lozenge look
+    const extrudeSettings = {
+      depth: th,
+      bevelEnabled: isTop && bevel > 0,
+      bevelSize: isTop ? bevel : 0,
+      bevelThickness: isTop ? bevel : 0,
+      bevelSegments: isTop && bevel > 0 ? bevelSegs : 0,
+      curveSegments: 32,
+    };
+
+    const geo = new THREE.ExtrudeGeometry(silhouette, extrudeSettings);
+    geo.applyMatrix4(rotMatrix);
 
     const mat = makeMaterial(
       layer.material,
       layer.finish || 'gloss',
       layer.color,
-      i === state.layers.length - 1 ? (layer.opacity ?? 100) : 100,
+      isTop ? (layer.opacity ?? 100) : 100,
       layer
     );
 
-    // Two clipping planes restrict this mesh to its Y band:
-    //   Plane(normal=(0,1,0),  constant=-yMin) clips away y < yMin
-    //   Plane(normal=(0,-1,0), constant=yMax)  clips away y > yMax
-    mat.clippingPlanes = [
-      new THREE.Plane(new THREE.Vector3(0,  1, 0), -yMin),
-      new THREE.Plane(new THREE.Vector3(0, -1, 0),  yMax),
-    ];
-    mat.clipIntersection = false;
+    // Polygon offset prevents z-fighting between coplanar layer boundaries
+    mat.polygonOffset = true;
+    mat.polygonOffsetFactor = -(i + 1);
+    mat.polygonOffsetUnits  = -(i + 1);
 
     // DoubleSide ensures back faces are visible through transparent acrylic
     if (layer.material === 'acrylic') mat.side = THREE.DoubleSide;
 
-    const mesh = new THREE.Mesh(sharedGeo, mat);
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.name = layer.name;
-
-    if (exploded) mesh.position.y = i * EXPLODE_GAP;
+    mesh.position.y = yAcc * UNIT + i * EXPLODE_GAP * explodeProgress;
 
     tileGroup.add(mesh);
     tileMeshes.push(mesh);
+    yAcc += layer.thickness;
   });
-
-  // ── Face decal planes ──────────────────────────────────────────
-  // Two thin PlaneGeometry meshes sit just above/below the tile surface.
-  // Their textures come only from the design canvas — not from the
-  // layer material UVs — so the image appears on exactly one flat face.
-
-  // Dispose old decal planes
-  if (facePlaneA) { tileGroup.remove(facePlaneA); facePlaneA.geometry.dispose(); facePlaneA.material.dispose(); facePlaneA = null; }
-  if (facePlaneB) { tileGroup.remove(facePlaneB); facePlaneB.geometry.dispose(); facePlaneB.material.dispose(); facePlaneB = null; }
-
-  const { width: W_tile, height: H_tile, depth: D_tile } = state.tile;
-
-  // MeshBasicMaterial: unlit so the design isn't affected by scene lighting
-  const matA = new THREE.MeshBasicMaterial({
-    transparent: true,
-    alphaTest: 0.01,            // discard fully-transparent pixels (rounded corners, empty areas)
-    depthWrite: false,          // prevents z-fighting with Cap surface
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-    side: THREE.FrontSide,
-  });
-  const planeGeoA = new THREE.PlaneGeometry(W_tile * UNIT, H_tile * UNIT);
-  facePlaneA = new THREE.Mesh(planeGeoA, matA);
-  // PlaneGeometry faces +Z by default; rotate so it faces +Y (upward)
-  facePlaneA.rotation.x = -Math.PI / 2;
-  // Position at top of tile, slightly above Cap surface
-  const explodeOffset = exploded ? (state.layers.length - 1) * EXPLODE_GAP : 0;
-  facePlaneA.position.y = (D_tile / 2 + 0.3) * UNIT + explodeOffset;
-  facePlaneA.name = 'facePlaneA';
-  tileGroup.add(facePlaneA);
-
-  const matB = new THREE.MeshBasicMaterial({
-    transparent: true,
-    alphaTest: 0.01,            // discard fully-transparent pixels (rounded corners, empty areas)
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-    side: THREE.BackSide,       // BackSide so it's visible when looking up at the bottom
-  });
-  const planeGeoB = new THREE.PlaneGeometry(W_tile * UNIT, H_tile * UNIT);
-  facePlaneB = new THREE.Mesh(planeGeoB, matB);
-  facePlaneB.rotation.x = Math.PI / 2;
-  // Position at bottom of tile, slightly below Base surface
-  facePlaneB.position.y = (-D_tile / 2 - 0.3) * UNIT;
-  facePlaneB.name = 'facePlaneB';
-  tileGroup.add(facePlaneB);
 
   applyDesignTexture();
   updateStackDiagram();
@@ -1749,15 +1809,21 @@ function setCameraPreset(preset) {
     camera.lookAt(0, 0, 0);
     controls.target.set(0, 0, 0);
   } else if (preset === 'exploded') {
-    buildTile(true);
+    // Animate explode — just set the target, animate() will lerp positions
+    tileIsExploded = true;
+    explodeTargetProgress = 1;
     const dist = maxDim * 3;
     camera.position.set(dist * 0.7, dist * 1.5, dist * 0.8);
     camera.lookAt(0, 0, 0);
     controls.target.set(0, 0, 0);
+    controls.update();
     return;
   }
 
-  if (tileIsExploded) buildTile(false);
+  if (tileIsExploded) {
+    tileIsExploded = false;
+    explodeTargetProgress = 0;
+  }
   controls.update();
 }
 
@@ -2183,17 +2249,22 @@ const designSys = {
   // No face background fill, no grid, no selection handles.
   // Called via draw() when _drawingFor3D is true.
   drawFor3D() {
-    const { width: W, height: H, bevelRadius: BR } = state.tile;
+    const { width: W, height: H, cornerTL = 3, cornerTR = 3, cornerBL = 3, cornerBR = 3 } = state.tile;
     const S = this.scale;
     const ctx = this.ctx;
 
     ctx.clearRect(0, 0, W * S, H * S);
 
-    // Clip to rounded rect so corners are transparent beyond the bevel edge
-    const r = Math.min((BR || 0) * S, (W * S) / 2, (H * S) / 2);
+    // Clip to per-corner silhouette so design is transparent beyond tile edges
     ctx.save();
     ctx.beginPath();
-    ctx.roundRect(0, 0, W * S, H * S, r);
+    // ctx.roundRect takes [tl, tr, br, bl] order (CSS spec)
+    ctx.roundRect(0, 0, W * S, H * S, [
+      (cornerTL || 0) * S,
+      (cornerTR || 0) * S,
+      (cornerBR || 0) * S,
+      (cornerBL || 0) * S,
+    ]);
     ctx.clip();
 
     this.elements.forEach(el => {
@@ -2230,50 +2301,85 @@ const designSys = {
     this._drawingFor3D = false;
 
     const isFaceA = face === 'A';
-    // Target the decal plane for this face — NOT the layer mesh material
-    const plane = isFaceA ? facePlaneA : facePlaneB;
+    const hasElements = this.activeFaceData.elements.length > 0;
 
-    if (plane && plane.material) {
-      const mat = plane.material;
-
-      // Dispose old texture to avoid GPU memory leak
-      if (mat.map) { mat.map.dispose(); mat.map = null; }
-
-      // Only create a texture if there are elements to show
-      if (this.activeFaceData.elements.length > 0) {
-        const colorTex = new THREE.CanvasTexture(this.canvas);
-        colorTex.colorSpace = THREE.SRGBColorSpace;
-        colorTex.needsUpdate = true;
-        mat.map = colorTex;
-        mat.opacity = 1;
-      } else {
-        mat.map = null;
-        mat.opacity = 0;
+    // ── Normal map on Cap/Base layer mesh ─────────────────────────────────
+    const layerMesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
+    if (layerMesh && layerMesh.material) {
+      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
+      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
+      if (hasElements) {
+        const normalStrength = state.engravingDepth * 8;
+        const normalCanvas = this.generateNormalMap(normalStrength);
+        const normalTex = new THREE.CanvasTexture(normalCanvas);
+        normalTex.needsUpdate = true;
+        mat.normalMap = normalTex;
+        mat.normalScale = new THREE.Vector2(1, 1);
       }
       mat.needsUpdate = true;
     }
 
-    // Also update the normal map on the Cap/Base layer mesh
-    // (this gives the embossed bump effect without affecting other faces)
-    const layerMesh = isFaceA
-      ? tileMeshes[tileMeshes.length - 1]
-      : tileMeshes[0];
+    // ── Decal plane ────────────────────────────────────────────────────────
+    // Retrieve or create the plane reference for this face
+    let plane = isFaceA ? facePlaneA : facePlaneB;
 
-    if (layerMesh && layerMesh.material && this.activeFaceData.elements.length > 0) {
-      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
-      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
-      const normalStrength = state.engravingDepth * 8;
-      const normalCanvas = this.generateNormalMap(normalStrength);
-      const normalTex = new THREE.CanvasTexture(normalCanvas);
-      normalTex.needsUpdate = true;
-      mat.normalMap = normalTex;
-      mat.normalScale = new THREE.Vector2(1, 1);
-      mat.needsUpdate = true;
-    } else if (layerMesh && layerMesh.material) {
-      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
-      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
-      mat.needsUpdate = true;
+    if (!hasElements) {
+      // No design — remove plane from scene entirely to prevent artifacts
+      if (plane) {
+        tileGroup.remove(plane);
+        plane.geometry.dispose();
+        plane.material.dispose();
+        if (isFaceA) facePlaneA = null; else facePlaneB = null;
+      }
+      state.design.activeFace = prev;
+      this.draw();
+      return;
     }
+
+    // Has elements — create plane if it doesn't exist yet
+    if (!plane) {
+      const { width: W_tile, height: H_tile, depth: D_tile } = state.tile;
+      const totalD = state.layers.reduce((s, l) => s + l.thickness, 0);
+
+      const planeMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        alphaTest: 0.5,
+        depthWrite: false,
+        depthTest: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+        side: isFaceA ? THREE.FrontSide : THREE.BackSide,
+      });
+      const planeGeo = new THREE.PlaneGeometry(W_tile * UNIT, H_tile * UNIT);
+      plane = new THREE.Mesh(planeGeo, planeMat);
+      plane.rotation.x = isFaceA ? -Math.PI / 2 : Math.PI / 2;
+      plane.name = isFaceA ? 'facePlaneA' : 'facePlaneB';
+
+      // Position relative to tile top/bottom
+      const capMesh = tileMeshes[tileMeshes.length - 1];
+      const baseMesh = tileMeshes[0];
+      if (isFaceA && capMesh) {
+        plane.position.y = capMesh.position.y + state.layers[state.layers.length - 1].thickness * UNIT + 0.3;
+      } else if (!isFaceA && baseMesh) {
+        plane.position.y = baseMesh.position.y - 0.3;
+      } else {
+        plane.position.y = isFaceA ? (totalD / 2 + 0.3) * UNIT : (-totalD / 2 - 0.3) * UNIT;
+      }
+
+      plane.visible = true;
+      tileGroup.add(plane);
+      if (isFaceA) facePlaneA = plane; else facePlaneB = plane;
+    }
+
+    // Apply design texture to the plane
+    const mat = plane.material;
+    if (mat.map) { mat.map.dispose(); mat.map = null; }
+    const colorTex = new THREE.CanvasTexture(this.canvas);
+    colorTex.colorSpace = THREE.SRGBColorSpace;
+    colorTex.needsUpdate = true;
+    mat.map = colorTex;
+    mat.needsUpdate = true;
 
     state.design.activeFace = prev;
     this.draw();  // restore the previously active face to the canvas
@@ -2315,7 +2421,8 @@ const flatLaySys = {
     this.clear();
     if (state.view.mode === 'single') return;
 
-    const { width: W, height: H, depth: D, bevelRadius: BR, bevelSegments: BS } = state.tile;
+    const { width: W, height: H, bevelRadius: BR, bevelSegments: BS,
+            cornerTL = 3, cornerTR = 3, cornerBL = 3, cornerBR = 3 } = state.tile;
     const count = state.flatlay.count;
     const gap   = state.flatlay.gap;
     const isIso = state.view.mode === 'iso-flatlay';
@@ -2327,48 +2434,49 @@ const flatLaySys = {
     const cols = Math.ceil(Math.sqrt(count * W / H));
     const rows = Math.ceil(count / cols);
 
-    // Clipping-plane approach matching buildTile(): one InstancedMesh per layer.
+    // Per-layer ExtrudeGeometry matching buildTile() architecture
     const layers = state.layers;
-    const r = BR || 0;
-    const segs = Math.max(1, Math.round(BS || 8));
-    const W_mm = W * UNIT, D_mm = D * UNIT, H_mm = H * UNIT;
-
-    // RoundedBoxGeometry signature: (width, height, depth, segments, radius)
-    let sharedGeo;
-    if (r < 0.001) {
-      sharedGeo = new THREE.BoxGeometry(W_mm, D_mm, H_mm);
-    } else {
-      const clampedR = Math.min(r * UNIT, W_mm / 2 - 0.01, D_mm / 2 - 0.01, H_mm / 2 - 0.01);
-      sharedGeo = new RoundedBoxGeometry(W_mm, D_mm, H_mm, segs, clampedR);
-    }
+    const W_mm = W * UNIT, H_mm = H * UNIT;
+    const bevel = Math.max(0, BR || 0);
+    const bevelSegs = Math.max(1, Math.round(BS || 8));
+    const silhouette = buildSilhouette(W_mm, H_mm, cornerTL, cornerTR, cornerBL, cornerBR);
+    const rotMatrix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
 
     const totalD = layers.reduce((s, l) => s + l.thickness, 0);
     let yAcc = -totalD / 2;
-    const bands = layers.map(layer => {
-      const yMin = yAcc * UNIT;
-      const yMax = (yAcc + layer.thickness) * UNIT;
-      yAcc += layer.thickness;
-      return { yMin, yMax };
-    });
+    const lastIdx = layers.length - 1;
 
     const dummy = new THREE.Object3D();
     const totalW = (cols - 1) * (W + gap) + (isIso ? (W + gap) * 0.5 : 0);
     const totalH_layout = (rows - 1) * (H + gap);
 
     layers.forEach((layer, li) => {
-      const { yMin, yMax } = bands[li];
-      const opacity = (li === layers.length - 1) ? (layer.opacity ?? 100) : 100;
+      const th = layer.thickness * UNIT;
+      const isTop = li === lastIdx;
+      const yMin = yAcc * UNIT;
+
+      const extrudeSettings = {
+        depth: th,
+        bevelEnabled: isTop && bevel > 0,
+        bevelSize: isTop ? bevel : 0,
+        bevelThickness: isTop ? bevel : 0,
+        bevelSegments: isTop && bevel > 0 ? bevelSegs : 0,
+        curveSegments: 32,
+      };
+      const geo = new THREE.ExtrudeGeometry(silhouette, extrudeSettings);
+      geo.applyMatrix4(rotMatrix);
+
+      const opacity = isTop ? (layer.opacity ?? 100) : 100;
       const mat = makeMaterial(layer.material, layer.finish || 'gloss', layer.color, opacity, layer);
-      mat.clippingPlanes = [
-        new THREE.Plane(new THREE.Vector3(0,  1, 0), -yMin),
-        new THREE.Plane(new THREE.Vector3(0, -1, 0),  yMax),
-      ];
-      mat.clipIntersection = false;
+      mat.polygonOffset = true;
+      mat.polygonOffsetFactor = -(li + 1);
+      mat.polygonOffsetUnits  = -(li + 1);
       if (layer.material === 'acrylic') mat.side = THREE.DoubleSide;
 
-      const iMesh = new THREE.InstancedMesh(sharedGeo, mat, count);
+      const iMesh = new THREE.InstancedMesh(geo, mat, count);
       iMesh.castShadow = false;
       iMesh.receiveShadow = true;
+      iMesh.position.y = yMin; // layer Y offset applied to the whole InstancedMesh
 
       let idx = 0;
       for (let row = 0; row < rows && idx < count; row++) {
@@ -2389,6 +2497,7 @@ const flatLaySys = {
       iMesh.count = idx;
       flatLayGroup.add(iMesh);
       this.meshes.push(iMesh);
+      yAcc += layer.thickness;
     });
 
     this.count = count;
@@ -3089,6 +3198,18 @@ function syncUIFromState() {
   const bsRange = document.getElementById('dim-bevel-segs-range');
   if (bsRange) bsRange.value = state.tile.bevelSegments;
 
+  // Per-corner radii
+  [['corner-tl', 'cornerTL'], ['corner-tr', 'cornerTR'],
+   ['corner-bl', 'cornerBL'], ['corner-br', 'cornerBR']].forEach(([id, key]) => {
+    const numEl   = document.getElementById(id);
+    const rangeEl = document.getElementById(id + '-range');
+    const val = state.tile[key] ?? 3;
+    if (numEl)   numEl.value   = val;
+    if (rangeEl) rangeEl.value = val;
+  });
+  const linkedCb = document.getElementById('corner-linked');
+  if (linkedCb) linkedCb.checked = state.tile.cornerLinked !== false;
+
   updateScaleRef();
 
   // Lighting
@@ -3202,6 +3323,39 @@ function initUI() {
     document.getElementById('dim-bevel-segs-range').value   = '8';
     buildTile(tileIsExploded);
     updateFlatLay();
+  });
+
+  // Per-corner radius controls
+  const cornerDefs = [
+    ['corner-tl', 'corner-tl-range', 'cornerTL'],
+    ['corner-tr', 'corner-tr-range', 'cornerTR'],
+    ['corner-bl', 'corner-bl-range', 'cornerBL'],
+    ['corner-br', 'corner-br-range', 'cornerBR'],
+  ];
+  const applyCorner = (key, val) => {
+    const v = parseFloat(val) || 0;
+    if (state.tile.cornerLinked) {
+      state.tile.cornerTL = state.tile.cornerTR = state.tile.cornerBL = state.tile.cornerBR = v;
+      cornerDefs.forEach(([numId, rangeId]) => {
+        const n = document.getElementById(numId);
+        const r = document.getElementById(rangeId);
+        if (n) n.value = v;
+        if (r) r.value = v;
+      });
+    } else {
+      state.tile[key] = v;
+    }
+    buildTile(tileIsExploded);
+    updateFlatLay();
+  };
+  cornerDefs.forEach(([numId, rangeId, key]) => {
+    const numEl   = document.getElementById(numId);
+    const rangeEl = document.getElementById(rangeId);
+    if (numEl)   numEl.addEventListener('input',   () => applyCorner(key, numEl.value));
+    if (rangeEl) rangeEl.addEventListener('input', () => applyCorner(key, rangeEl.value));
+  });
+  document.getElementById('corner-linked')?.addEventListener('change', e => {
+    state.tile.cornerLinked = e.target.checked;
   });
 
   // View mode buttons
@@ -3432,6 +3586,15 @@ let fps = 0;
 // ─────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
+
+  // Animate exploded view — lerp explodeProgress toward target
+  if (Math.abs(explodeProgress - explodeTargetProgress) > 0.001) {
+    explodeProgress += (explodeTargetProgress - explodeProgress) * 0.1;
+    if (Math.abs(explodeProgress - explodeTargetProgress) < 0.001) {
+      explodeProgress = explodeTargetProgress;
+    }
+    updateExplodedPositions();
+  }
 
   controls.update();
   renderer.render(scene, camera);
