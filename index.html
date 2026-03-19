@@ -2296,6 +2296,13 @@ const designSys = {
   applyFaceTexture(face) {
     const prev = state.design.activeFace;
     state.design.activeFace = face;
+
+    // Always fully clear the canvas before drawing for 3D to prevent
+    // stale pixel data from producing black noise on subsequent renders.
+    if (this.canvas) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+
     this._drawingFor3D = true;
     this.draw();  // routes to drawFor3D() — transparent bg, no grid, bevel clip
     this._drawingFor3D = false;
