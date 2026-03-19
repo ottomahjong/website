@@ -1465,16 +1465,36 @@ function makeMaterial(materialKey, finish, color, opacity = 100, layer = null) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TILE GEOMETRY BUILDER — Shared Silhouette Architecture
+// TILE GEOMETRY BUILDER — Monolithic Filleted Cuboid Architecture
 //
-// All layers share one buildSilhouette() 2D shape (XY footprint).
-// Each layer is an ExtrudeGeometry of that shape to its own depth.
-// Cap (top) layer: bevel on the top face → glassy lozenge curve.
-// Base (bottom) layer: bevel on the bottom face → floor-contact curve.
-// Body / Inlay: bevelEnabled false → straight sides, zero muffin effect.
+// The tile is a single monolithic rounded rectangular prism (filleted
+// cuboid) with embedded internal material strata.
+//
+// TWO-OBJECT MODEL:
+//   envelopeMesh — one full-depth ExtrudeGeometry with bevelEnabled.
+//                  ExtrudeGeometry bevels BOTH the top face (z=depth)
+//                  AND the bottom face (z=0) symmetrically, giving the
+//                  outer shell its lozenge/pillow profile on both ends.
+//                  Material array: [capMat, baseMat, invisibleSideMat]
+//                  → top and bottom faces carry material color; side wall
+//                    is invisible (opacity 0, depthWrite false).
+//
+//   tileMeshes[] — N band meshes (one per layer), each using the same
+//                  silhouette extruded to that layer's thickness. Two
+//                  world-space clipping planes restrict rendering to the
+//                  band's Y range so only the side-wall ring is visible.
+//                  This provides the side-wall material color banding.
+//
+// EXPLODED VIEW: envelopeMesh hidden, band meshes switch to beveled
+// geometry with no clip planes → each slab reads as a standalone piece.
+//
+// renderer.localClippingEnabled = true is required (set at init).
 // ─────────────────────────────────────────────────────────────
 const UNIT = 1;
-let tileMeshes = [];      // one mesh per layer
+let tileMeshes = [];      // one band mesh per layer (side-wall coloring, indexed 0..N-1)
+let envelopeMesh = null;  // single outer-shell mesh: filleted cuboid for the whole tile
+let bandGeosNormal   = []; // per-layer ExtrudeGeometry (no bevel) for normal view
+let bandGeosExploded = []; // per-layer ExtrudeGeometry (bevel) for exploded view
 let tileIsExploded = false;
 let facePlaneA = null;  // decal plane: Face A texture on top of Cap
 let facePlaneB = null;  // decal plane: Face B texture on bottom of Base
@@ -1483,6 +1503,23 @@ const EXPLODE_GAP = 8;
 // Animated explode state
 let explodeProgress = 0;      // 0 = collapsed, 1 = fully exploded
 let explodeTargetProgress = 0;
+
+// ─────────────────────────────────────────────────────────────
+// SYNC BAND CLIP PLANES
+// Updates world-space clipping planes on a band mesh material so
+// they follow the mesh's current Y position. Call this whenever
+// mesh.position.y changes during normal (non-exploded) view.
+// ─────────────────────────────────────────────────────────────
+function syncBandClip(mesh, i) {
+  const planes = mesh.material.clippingPlanes;
+  if (!planes || planes.length !== 2) return;
+  const yBottom = mesh.position.y;
+  const yTop    = yBottom + state.layers[i].thickness * UNIT;
+  // plane 0: (0,1,0)·p + c >= 0  →  y >= -c  →  c = -(yBottom+ε)  clip below band bottom
+  // plane 1: (0,-1,0)·p + c >= 0 →  y <=  c  →  c = yTop-ε        clip above band top
+  planes[0].constant = -(yBottom + 0.01);
+  planes[1].constant =   yTop    - 0.01;
+}
 
 // ─────────────────────────────────────────────────────────────
 // SILHOUETTE BUILDER
@@ -1656,12 +1693,14 @@ function updateLayerLabels() {
   });
 }
 
-// Update all positions driven by explodeProgress (face planes + discs).
+// Update all positions driven by explodeProgress (band meshes, face planes, discs).
 function updateExplodedPositions() {
   const stacked  = computeStackedPositions();
   const exploded = computeExplodedPositions();
   tileMeshes.forEach((mesh, i) => {
     mesh.position.y = stacked[i] + (exploded[i] - stacked[i]) * explodeProgress;
+    // In collapsed state (explodeProgress < 1) keep clip planes tracking mesh position
+    if (explodeProgress < 1) syncBandClip(mesh, i);
   });
   updateShadowDiscPositions();
   if (facePlaneA && tileMeshes.length > 0) {
@@ -1681,6 +1720,33 @@ function animateExplode(toExploded, duration = 800) {
   tileIsExploded  = toExploded;
 
   if (explodeAnimRaf) { cancelAnimationFrame(explodeAnimRaf); explodeAnimRaf = null; }
+
+  // ── Swap geometry and clipping mode before animation starts ───────────────
+  // Exploded: envelope hidden, each band is a standalone beveled slab (no clips).
+  // Normal:   envelope visible, each band is a clipped side-wall ring.
+  if (toExploded) {
+    if (envelopeMesh) envelopeMesh.visible = false;
+    tileMeshes.forEach((mesh, i) => {
+      if (mesh.geometry !== bandGeosExploded[i]) {
+        mesh.geometry = bandGeosExploded[i];
+      }
+      mesh.material.clippingPlanes = [];
+    });
+  } else {
+    if (envelopeMesh) envelopeMesh.visible = true;
+    tileMeshes.forEach((mesh, i) => {
+      if (mesh.geometry !== bandGeosNormal[i]) {
+        mesh.geometry = bandGeosNormal[i];
+      }
+      // Restore clip planes at their current (about-to-animate) positions
+      const yBottom = mesh.position.y;
+      const yTop    = yBottom + state.layers[i].thickness * UNIT;
+      mesh.material.clippingPlanes = [
+        new THREE.Plane(new THREE.Vector3(0,  1, 0), -(yBottom + 0.01)),
+        new THREE.Plane(new THREE.Vector3(0, -1, 0),   yTop    - 0.01),
+      ];
+    });
+  }
 
   const start  = performance.now();
   const fromY  = tileMeshes.map(m => m.position.y);
@@ -1726,6 +1792,8 @@ function animateExplode(toExploded, duration = 800) {
 
     tileMeshes.forEach((mesh, i) => {
       mesh.position.y = fromY[i] + (toY[i] - fromY[i]) * ease;
+      // Keep clip planes tracking the band position during collapse animation
+      if (!toExploded) syncBandClip(mesh, i);
     });
     updateShadowDiscPositions();
     if (facePlaneA && tileMeshes.length > 0) {
@@ -1754,15 +1822,15 @@ function animateExplode(toExploded, duration = 800) {
   explodeAnimRaf = requestAnimationFrame(tick);
 }
 
-function buildTile(exploded = false) {
-  // Cancel any in-progress explode animation before rebuilding geometry
+function buildTile() {
+  // ── Reset animation state ──────────────────────────────────────────────────
   if (explodeAnimRaf) { cancelAnimationFrame(explodeAnimRaf); explodeAnimRaf = null; }
   tileIsExploded   = false;
   state.exploded   = false;
   explodeProgress  = 0;
   explodeTargetProgress = 0;
 
-  // Dispose and remove all existing layer meshes
+  // ── Dispose old band meshes ────────────────────────────────────────────────
   tileMeshes.forEach(m => {
     tileGroup.remove(m);
     if (m.geometry) m.geometry.dispose();
@@ -1771,7 +1839,20 @@ function buildTile(exploded = false) {
   });
   tileMeshes = [];
 
-  // Dispose old decal planes
+  // ── Dispose old envelope mesh ──────────────────────────────────────────────
+  if (envelopeMesh) {
+    tileGroup.remove(envelopeMesh);
+    envelopeMesh.geometry.dispose();
+    if (Array.isArray(envelopeMesh.material)) envelopeMesh.material.forEach(m => m.dispose());
+    else envelopeMesh.material.dispose();
+    envelopeMesh = null;
+  }
+
+  // ── Dispose cached band geometries ────────────────────────────────────────
+  bandGeosNormal.forEach(g => g.dispose());   bandGeosNormal   = [];
+  bandGeosExploded.forEach(g => g.dispose()); bandGeosExploded = [];
+
+  // ── Dispose old decal planes ───────────────────────────────────────────────
   if (facePlaneA) { tileGroup.remove(facePlaneA); facePlaneA.geometry.dispose(); facePlaneA.material.dispose(); facePlaneA = null; }
   if (facePlaneB) { tileGroup.remove(facePlaneB); facePlaneB.geometry.dispose(); facePlaneB.material.dispose(); facePlaneB = null; }
 
@@ -1780,80 +1861,134 @@ function buildTile(exploded = false) {
   const { width: W, height: H, bevelRadius: BR, bevelSegments: BS,
           cornerTL = 3, cornerTR = 3, cornerBL = 3, cornerBR = 3 } = state.tile;
   const W_mm = W * UNIT, H_mm = H * UNIT;
-  const bevel = Math.max(0, BR || 0);
+  const bevel    = Math.max(0, BR || 0);
   const bevelSegs = Math.max(1, Math.round(BS || 8));
 
-  // Build shared 2D silhouette — all layers use the same XY outline
+  // Shared 2D silhouette — all geometry uses the same XZ footprint
   const silhouette = buildSilhouette(W_mm, H_mm, cornerTL, cornerTR, cornerBL, cornerBR);
 
-  // Rotation matrix: extrusion (Z) → stacking (Y), shape Y → world -Z
-  // Tile face is XZ plane; extrusion axis maps to Y (stacking direction).
+  // Rotation: extrusion axis Z → world stacking axis Y; shape XY → tile face XZ
   const rotMatrix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
 
-  const totalD = state.layers.reduce((s, l) => s + l.thickness, 0);
-  let yAcc = -totalD / 2;
+  const totalD  = state.layers.reduce((s, l) => s + l.thickness, 0);
   const lastIdx = state.layers.length - 1;
 
+  // ── ENVELOPE MESH ─────────────────────────────────────────────────────────
+  // One monolithic filleted cuboid representing the full tile outer shell.
+  // ExtrudeGeometry with bevelEnabled applies the bevel to BOTH the bottom
+  // face (z=0 → world Y=0) and the top face (z=depth → world Y=totalD),
+  // giving the tile its lozenge / pillow top-and-bottom edge profile.
+  //
+  // Group layout after rotMatrix:
+  //   group 0 → front cap (z=depth = world Y top) → Cap material
+  //   group 1 → back  cap (z=0    = world Y bot) → Base material
+  //   group 2 → side wall                         → invisible (transparent)
+  // ─────────────────────────────────────────────────────────────────────────
+  const envBevel = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR);
+  const envGeo = new THREE.ExtrudeGeometry(silhouette, {
+    depth:          totalD,
+    bevelEnabled:   envBevel > 0,
+    bevelSize:      envBevel,
+    bevelThickness: envBevel,
+    bevelSegments:  bevelSegs,
+    curveSegments:  32,
+  });
+  envGeo.applyMatrix4(rotMatrix);
+
+  const capLayer  = state.layers[lastIdx];
+  const baseLayer = state.layers[0];
+
+  const envTopMat = makeMaterial(
+    capLayer.material, capLayer.finish || 'gloss',
+    capLayer.color, capLayer.opacity ?? 100, capLayer
+  );
+  const envBotMat = makeMaterial(
+    baseLayer.material, baseLayer.finish || 'gloss',
+    baseLayer.color, 100, baseLayer
+  );
+  // Side wall is invisible — all side-wall coloring comes from the band meshes below
+  const envSideMat = new THREE.MeshBasicMaterial({
+    transparent: true, opacity: 0, depthWrite: false,
+  });
+
+  envelopeMesh = new THREE.Mesh(envGeo, [envTopMat, envBotMat, envSideMat]);
+  envelopeMesh.castShadow    = true;
+  envelopeMesh.receiveShadow = true;
+  envelopeMesh.name          = 'TileEnvelope';
+  envelopeMesh.position.y    = -totalD / 2 * UNIT;
+  tileGroup.add(envelopeMesh);
+
+  // ── BAND MESHES ───────────────────────────────────────────────────────────
+  // One ExtrudeGeometry per layer, responsible for the side-wall color band
+  // that shows the internal material strata. In normal view each band is
+  // clipped to its own Y range so only its side-wall ring is visible — the
+  // top/bottom caps of each band are hidden by the epsilon-inset clip planes
+  // and depth-occluded by the envelope caps. The side wall is flush with the
+  // shared outer silhouette; the envelope's invisible side-wall group sits on
+  // top (polygon-offset) without occluding it.
+  //
+  // In exploded view: envelope hides, each band switches to a beveled geometry
+  // with no clip planes so it reads as a standalone rounded slab.
+  // ─────────────────────────────────────────────────────────────────────────
+  let yAcc = -totalD / 2;
+
   state.layers.forEach((layer, i) => {
-    const th = layer.thickness * UNIT;
+    const th       = layer.thickness * UNIT;
     const isTop    = i === lastIdx;
     const isBottom = i === 0;
+    const yBottom  = yAcc * UNIT;
+    const yTop     = yBottom + th;
 
-    // Bevel guard: size must never exceed any corner radius or ~45% of layer thickness.
-    // Exceeding a corner radius produces degenerate geometry in Three.js.
-    const safeBevel = Math.min(
-      bevel,
-      cornerTL, cornerTR, cornerBL, cornerBR,
-      th * 0.45
-    );
+    // ── Normal-view geometry: no bevel, clipped to Y band ─────────────────
+    const normalGeo = new THREE.ExtrudeGeometry(silhouette, {
+      depth: th, bevelEnabled: false, curveSegments: 32,
+    });
+    normalGeo.applyMatrix4(rotMatrix);
+    bandGeosNormal.push(normalGeo);
 
-    // Cap gets bevel on top face; Base gets bevel on bottom face (see flip below).
-    // Body and Inlay have no bevel — perfectly straight sides, no muffin effect.
-    const needsBevel = (isTop || isBottom) && safeBevel > 0;
-    const extrudeSettings = {
-      depth: th,
-      bevelEnabled: needsBevel,
-      bevelSize:      needsBevel ? safeBevel : 0,
-      bevelThickness: needsBevel ? safeBevel : 0,
-      bevelSegments:  needsBevel ? bevelSegs : 0,
-      curveSegments: 32,
-    };
-
-    const geo = new THREE.ExtrudeGeometry(silhouette, extrudeSettings);
-    geo.applyMatrix4(rotMatrix);
-
-    // For the base layer: the bevel sits at the top of the extrusion (local Y=+th).
-    // Flip it to the bottom face by: (1) makeRotationX(π) → bevel moves to Y=-th,
-    // then (2) translate +th → bevel at Y=0.  mesh.position.y stays unchanged.
-    // makeRotationX(π) has det=+1 so winding order and normals are preserved.
-    if (isBottom && needsBevel) {
-      const flipAndShift = new THREE.Matrix4()
-        .makeTranslation(0, th, 0)
-        .multiply(new THREE.Matrix4().makeRotationX(Math.PI));
-      geo.applyMatrix4(flipAndShift);
+    // ── Exploded-view geometry: bevel on outermost layers (standalone slabs)
+    const safeBevelBand = Math.min(bevel, cornerTL, cornerTR, cornerBL, cornerBR, th * 0.45);
+    const needsBandBevel = (isTop || isBottom) && safeBevelBand > 0;
+    const explodedGeo = new THREE.ExtrudeGeometry(silhouette, {
+      depth:          th,
+      bevelEnabled:   needsBandBevel,
+      bevelSize:      needsBandBevel ? safeBevelBand : 0,
+      bevelThickness: needsBandBevel ? safeBevelBand : 0,
+      bevelSegments:  needsBandBevel ? bevelSegs : 0,
+      curveSegments:  32,
+    });
+    explodedGeo.applyMatrix4(rotMatrix);
+    // Base layer: flip bevel to bottom face
+    if (isBottom && needsBandBevel) {
+      explodedGeo.applyMatrix4(
+        new THREE.Matrix4().makeTranslation(0, th, 0)
+          .multiply(new THREE.Matrix4().makeRotationX(Math.PI))
+      );
     }
+    bandGeosExploded.push(explodedGeo);
 
+    // ── Material ──────────────────────────────────────────────────────────
     const mat = makeMaterial(
-      layer.material,
-      layer.finish || 'gloss',
-      layer.color,
-      isTop ? (layer.opacity ?? 100) : 100,
-      layer
+      layer.material, layer.finish || 'gloss',
+      layer.color, isTop ? (layer.opacity ?? 100) : 100, layer
     );
-
-    // Polygon offset prevents z-fighting between coplanar layer boundaries
-    mat.polygonOffset = true;
+    mat.polygonOffset      = true;
     mat.polygonOffsetFactor = -(i + 1);
     mat.polygonOffsetUnits  = -(i + 1);
-
-    // DoubleSide ensures back faces are visible through transparent acrylic
     if (layer.material === 'acrylic') mat.side = THREE.DoubleSide;
 
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
+    // Clip planes bracket this band's Y range; epsilon insets suppress cap faces.
+    mat.clippingPlanes = [
+      new THREE.Plane(new THREE.Vector3(0,  1, 0), -(yBottom + 0.01)),
+      new THREE.Plane(new THREE.Vector3(0, -1, 0),   yTop    - 0.01),
+    ];
+
+    // ── Band mesh ─────────────────────────────────────────────────────────
+    const mesh = new THREE.Mesh(normalGeo, mat);
+    mesh.castShadow    = true;
     mesh.receiveShadow = true;
-    mesh.name = layer.name;
-    mesh.position.y = yAcc * UNIT; // explode animation applied separately
+    mesh.name          = layer.name;
+    mesh.position.y    = yBottom;
 
     tileGroup.add(mesh);
     tileMeshes.push(mesh);
@@ -2577,20 +2712,25 @@ const designSys = {
     const isFaceA = face === 'A';
     const hasElements = this.activeFaceData.elements.length > 0;
 
-    // ── Normal map on Cap/Base layer mesh ─────────────────────────────────
-    const layerMesh = isFaceA ? tileMeshes[tileMeshes.length - 1] : tileMeshes[0];
-    if (layerMesh && layerMesh.material) {
-      const mat = Array.isArray(layerMesh.material) ? layerMesh.material[0] : layerMesh.material;
-      if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
+    // ── Normal map on envelope face (Cap top or Base bottom) ──────────────
+    // The envelope mesh renders the tile's top and bottom cap faces, so the
+    // engraving normal map must target its face material, not the band mesh.
+    //   envelopeMesh.material[0] → front cap (z=depth = world top) = Cap face
+    //   envelopeMesh.material[1] → back  cap (z=0    = world bot) = Base face
+    const envFaceMat = envelopeMesh
+      ? (isFaceA ? envelopeMesh.material[0] : envelopeMesh.material[1])
+      : null;
+    if (envFaceMat) {
+      if (envFaceMat.normalMap) { envFaceMat.normalMap.dispose(); envFaceMat.normalMap = null; }
       if (hasElements) {
         const normalStrength = state.engravingDepth * 8;
         const normalCanvas = this.generateNormalMap(normalStrength);
         const normalTex = new THREE.CanvasTexture(normalCanvas);
         normalTex.needsUpdate = true;
-        mat.normalMap = normalTex;
-        mat.normalScale = new THREE.Vector2(1, 1);
+        envFaceMat.normalMap  = normalTex;
+        envFaceMat.normalScale = new THREE.Vector2(1, 1);
       }
-      mat.needsUpdate = true;
+      envFaceMat.needsUpdate = true;
     }
 
     // ── Decal plane ────────────────────────────────────────────────────────
