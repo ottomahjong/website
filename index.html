@@ -2386,11 +2386,18 @@ const designSys = {
   },
 };
 
-// Wrapper: apply both face designs to the tile (called from buildTile)
+// Wrapper: apply both face designs to the tile (called from buildTile).
+// Planes are only added to the scene when elements exist; removed otherwise.
 function applyDesignTexture() {
-  if (!designSys.canvas) return;
-  // Always apply both faces — applyFaceTexture handles empty state
-  // by hiding the decal plane (opacity 0 / no map)
+  if (!designSys.canvas) {
+    // Canvas not ready — ensure any lingering planes are removed
+    [facePlaneA, facePlaneB].forEach(p => {
+      if (p) { tileGroup.remove(p); p.geometry.dispose(); p.material.dispose(); }
+    });
+    facePlaneA = null;
+    facePlaneB = null;
+    return;
+  }
   designSys.applyToTile();
 }
 
