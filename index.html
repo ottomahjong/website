@@ -2331,8 +2331,10 @@ const designSys = {
     let plane = isFaceA ? facePlaneA : facePlaneB;
 
     if (!hasElements) {
-      // No design — remove plane from scene entirely to prevent artifacts
+      // No design — hide immediately then remove from scene to prevent any
+      // in-flight render from drawing the plane before it is disposed.
       if (plane) {
+        plane.visible = false;
         tileGroup.remove(plane);
         plane.geometry.dispose();
         plane.material.dispose();
